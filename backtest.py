@@ -161,9 +161,12 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------
     if os.path.exists(REAL_DATA_PATH):
         logger.info(f"Real market data found: {REAL_DATA_PATH}")
-        test_data = pd.read_csv(REAL_DATA_PATH)
-        logger.info(f"Loaded {len(test_data):,} rows from real market data.")
-        data_source = "Real Binance Data"
+        full_df = pd.read_csv(REAL_DATA_PATH)
+        split_idx = int(len(full_df) * 0.8)
+        test_data = full_df.iloc[split_idx:].reset_index(drop=True)
+        logger.info(f"Out-of-sample test: last {len(test_data):,} rows "
+                     f"(of {len(full_df):,} total, 20% split).")
+        data_source = "Real Binance Data (Out-of-Sample)"
     else:
         logger.info("No real data found. Generating synthetic backtest data...")
         STEPS = 5000

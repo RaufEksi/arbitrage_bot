@@ -28,26 +28,21 @@ class OFITradingEnv(gym.Env):
         1: Buy (Go Long / Close Short)
         2: Sell (Go Short / Close Long)
         
-    Reward Mechanism (V2 — Anti-Overtrading):
+    Reward Mechanism (V4 — Balanced):
         - Differential ΔPnL for holding positions
         - Commission + slippage cost on every trade
         - Realized PnL on position close
-        - Hold bonus: reward for maintaining a profitable position
-        - Flat bonus: reward for staying flat when OFI signal is weak
-        - Overtrading penalty: punish excessive trading frequency
-        - Redundant action penalty: punish no-op actions (SELL while short)
+        - Soft overtrading penalty: gentle discouragement of excessive trading
+        - Soft redundant action penalty: gentle discouragement of no-op actions
     """
     
     metadata = {"render_modes": ["ansi"]}
     
-    # --- Reward Tuning Constants ---
-    HOLD_BONUS = 0.00005            # Bonus for holding a profitable position
-    FLAT_BONUS = 0.00002            # Bonus for staying flat when signal is weak
-    OFI_WEAK_THRESHOLD = 1.0        # |OFI| below this = weak signal
+    # --- Reward Tuning Constants (V4 — Softened) ---
     OVERTRADE_WINDOW = 50           # Look at last N ticks for overtrading check
     OVERTRADE_MAX = 20              # Max trades allowed in the window
-    OVERTRADE_PENALTY = 0.001       # Penalty per excess trade
-    REDUNDANT_PENALTY = 0.0008      # Penalty for redundant actions (2x commission)
+    OVERTRADE_PENALTY = 0.0003      # V4: Softened (was 0.001)
+    REDUNDANT_PENALTY = 0.0003      # V4: Softened (was 0.0008)
     OFI_LOOKBACK = 5                # Number of past OFI values in state
     EMA_SPAN = 20                   # Span for OFI EMA calculation
     
@@ -241,18 +236,10 @@ class OFITradingEnv(gym.Env):
             self.trade_history.append(0)
         
         # ----------------------------------------------------------
-        # 3. REWARD ENGINEERING — V2 BONUSES & PENALTIES
+        # 3. REWARD ENGINEERING — V4 SOFT PENALTIES ONLY
         # ----------------------------------------------------------
         
-        # A) Hold Bonus: Reward holding a PROFITABLE position
-        if action == 0 and self.current_position != 0 and delta_pnl > 0:
-            step_reward += self.HOLD_BONUS
-        
-        # B) Flat Bonus: Reward staying flat when OFI signal is weak
-        if action == 0 and self.current_position == 0 and abs(self.latest_ofi) < self.OFI_WEAK_THRESHOLD:
-            step_reward += self.FLAT_BONUS
-        
-        # C) Overtrading Penalty: Too many trades in recent window
+        # Overtrading Penalty: Gentle discouragement of excessive trading
         recent_trades = sum(self.trade_history)
         if recent_trades > self.OVERTRADE_MAX:
             excess = recent_trades - self.OVERTRADE_MAX

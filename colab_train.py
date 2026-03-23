@@ -1,14 +1,12 @@
 # =============================================================
-# HFT OFI Trading Bot -- Google Colab Training Script (V3)
+# HFT OFI Trading Bot -- Google Colab Training Script (V4)
 # =============================================================
 # KULLANIM:
-# 1. Google Colab'a gidin: https://colab.research.google.com
-# 2. Runtime > Change runtime type > GPU secin
-# 3. Bu dosyanin ICERIGINI tek bir hucreye yapistirin
-# 4. Calistirinca otomatik olarak CSV yukleme penceresi acilacak
-#    --> data/btcusdt_ofi_data.csv dosyanizi yukleyin
-# 5. Egitim bitince best_model.zip + vec_normalize.pkl indirilecek
-# 6. Indirilen 2 dosyayi projenizin models/ klasorune koyun
+# 1. Google Colab > Runtime > Change runtime type > GPU
+# 2. Bu dosyanin icerigini tek bir hucreye yapistirin
+# 3. CSV yukleme penceresi acilinca btcusdt_ofi_data.csv yukleyin
+# 4. Egitim bittikten sonra best_model.zip + vec_normalize.pkl indirilir
+# 5. Indirilen 2 dosyayi projenizin models/ klasorune koyun
 # =============================================================
 
 # --- CELL 1: Kurulum ---
@@ -17,7 +15,7 @@ subprocess.check_call([sys.executable, "-m", "pip", "install", "-q",
                        "stable-baselines3[extra]", "gymnasium", "numpy",
                        "pandas", "tensorboard"])
 
-# --- CELL 2: V3 env.py'yi Colab'a Yaz (DataFrame destekli) ---
+# --- CELL 2: V4 env.py (bonuslar kaldirildi, cezalar yumusaklandi) ---
 ENV_CODE = r'''
 import gymnasium as gym
 from gymnasium import spaces
@@ -33,13 +31,11 @@ logging.basicConfig(level=logging.WARNING)
 class OFITradingEnv(gym.Env):
     metadata = {"render_modes": ["ansi"]}
     
-    HOLD_BONUS = 0.00005
-    FLAT_BONUS = 0.00002
-    OFI_WEAK_THRESHOLD = 1.0
+    # V4: Softened penalties, no bonuses
     OVERTRADE_WINDOW = 50
     OVERTRADE_MAX = 20
-    OVERTRADE_PENALTY = 0.001
-    REDUNDANT_PENALTY = 0.0008
+    OVERTRADE_PENALTY = 0.0003
+    REDUNDANT_PENALTY = 0.0003
     OFI_LOOKBACK = 5
     EMA_SPAN = 20
     
@@ -48,7 +44,6 @@ class OFITradingEnv(gym.Env):
         self.commission_rate = commission_rate
         self.render_mode = render_mode
         
-        # DataFrame mode
         self.df = df
         if self.df is not None:
             required = {"bid_price", "ask_price", "ofi", "spread"}
@@ -180,10 +175,7 @@ class OFITradingEnv(gym.Env):
         else:
             self.trade_history.append(0)
         
-        if action == 0 and self.current_position != 0 and delta_pnl > 0:
-            step_reward += self.HOLD_BONUS
-        if action == 0 and self.current_position == 0 and abs(self.latest_ofi) < self.OFI_WEAK_THRESHOLD:
-            step_reward += self.FLAT_BONUS
+        # V4: Only soft overtrading penalty, no bonuses
         rt = sum(self.trade_history)
         if rt > self.OVERTRADE_MAX:
             step_reward -= (rt - self.OVERTRADE_MAX) * self.OVERTRADE_PENALTY
@@ -226,9 +218,9 @@ class OFITradingEnv(gym.Env):
 
 with open("ofi_env.py", "w") as f:
     f.write(ENV_CODE)
-print("V3 ofi_env.py yazildi (12-dim state, DataFrame modu, reward engineering).")
+print("V4 ofi_env.py yazildi (bonuslar kaldirildi, cezalar 0.0003).")
 
-# --- CELL 3: GERCEK VERIYI YUKLE ---
+# --- CELL 3: CSV YUKLE ---
 import os
 import pandas as pd
 from google.colab import files
@@ -236,27 +228,25 @@ from google.colab import files
 print("\n" + "="*60)
 print("  GERCEK VERI YUKLEME")
 print("  Lutfen btcusdt_ofi_data.csv dosyanizi secin.")
-print("  (data_collector.py ile toplamis oldugunuz CSV)")
 print("="*60 + "\n")
 
 uploaded = files.upload()
 csv_filename = list(uploaded.keys())[0]
-print(f"\nYuklenen dosya: {csv_filename}")
+full_df = pd.read_csv(csv_filename)
+print(f"Toplam satir: {len(full_df):,}")
 
-real_df = pd.read_csv(csv_filename)
-print(f"Toplam satir: {len(real_df):,}")
-print(f"Kolonlar: {list(real_df.columns)}")
-print(f"\nIlk 3 satir:")
-print(real_df.head(3))
-
-# Zorunlu kolon kontrolu
 required = {"bid_price", "ask_price", "ofi", "spread"}
-missing = required - set(real_df.columns)
+missing = required - set(full_df.columns)
 if missing:
-    raise ValueError(f"CSV'de eksik kolonlar var: {missing}")
-print(f"\nKolon kontrolu GECTI. Veriye hazir!")
+    raise ValueError(f"CSV'de eksik kolonlar: {missing}")
 
-# --- CELL 4: GERCEK VERI ILE EGITIM ---
+# 80/20 Train/Test Split
+split_idx = int(len(full_df) * 0.8)
+train_df = full_df.iloc[:split_idx].reset_index(drop=True)
+test_df = full_df.iloc[split_idx:].reset_index(drop=True)
+print(f"Train: {len(train_df):,} satir | Test: {len(test_df):,} satir")
+
+# --- CELL 4: V4 EGITIM ---
 import numpy as np
 import importlib
 from stable_baselines3 import PPO
@@ -264,7 +254,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.callbacks import EvalCallback
 
 import ofi_env
-importlib.reload(ofi_env)  # Colab eski modulu cache'ler, reload sart
+importlib.reload(ofi_env)
 from ofi_env import OFITradingEnv
 
 MODELS_DIR = "./models/"
@@ -272,15 +262,18 @@ LOGS_DIR = "./logs/"
 os.makedirs(MODELS_DIR, exist_ok=True)
 os.makedirs(LOGS_DIR, exist_ok=True)
 
-# DataFrame modunda ortam olustur
-def make_env():
-    return OFITradingEnv(commission_rate=0.0004, df=real_df)
+# Train ortami: sadece ilk %80
+def make_train_env():
+    return OFITradingEnv(commission_rate=0.0004, df=train_df)
 
-env = DummyVecEnv([make_env])
-eval_env = DummyVecEnv([make_env])
+# Eval ortami: son %20 (out-of-sample)
+def make_eval_env():
+    return OFITradingEnv(commission_rate=0.0004, df=test_df)
+
+env = DummyVecEnv([make_train_env])
+eval_env = DummyVecEnv([make_eval_env])
 env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0)
 eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, clip_obs=10.0)
-print("VecNormalize aktif: norm_obs=True, norm_reward=True, clip_obs=10.0")
 
 eval_callback = EvalCallback(
     eval_env, 
@@ -292,9 +285,9 @@ eval_callback = EvalCallback(
 )
 
 # ================================================================
-# V3 HYPERPARAMETERS -- Gercek veri icin optimize edilmis
+# V4 HYPERPARAMETERS
 # ================================================================
-TOTAL_TIMESTEPS = 2_000_000  # 2M timestep (gercek veri daha fazla iterasyon gerektirir)
+TOTAL_TIMESTEPS = 2_000_000
 
 model = PPO(
     "MlpPolicy",
@@ -306,25 +299,25 @@ model = PPO(
     gamma=0.95,
     gae_lambda=0.95,
     clip_range=0.2,
-    ent_coef=0.02,
+    ent_coef=0.05,             # V4: Higher exploration
     verbose=1,
     tensorboard_log=LOGS_DIR,
     device="auto"
 )
 
-print(f"\nV3 Egitim basliyor: {TOTAL_TIMESTEPS:,} timestep (gercek Binance verisi)...")
+print(f"\nV4 Egitim: {TOTAL_TIMESTEPS:,} timestep | Train: {len(train_df):,} satir")
 model.learn(
     total_timesteps=TOTAL_TIMESTEPS,
     callback=eval_callback,
-    tb_log_name="PPO_OFI_V3_RealData"
+    tb_log_name="PPO_OFI_V4"
 )
 
 model.save(os.path.join(MODELS_DIR, "final_trading_model"))
 vec_norm_path = os.path.join(MODELS_DIR, "vec_normalize.pkl")
 env.save(vec_norm_path)
-print("V3 Egitim tamamlandi! Model + VecNormalize stats kaydedildi.")
+print("V4 Egitim tamamlandi!")
 
-# --- CELL 5: MODELI INDIR ---
+# --- CELL 5: INDIR ---
 best_path = os.path.join(MODELS_DIR, "best_model.zip")
 final_path = os.path.join(MODELS_DIR, "final_trading_model.zip")
 
@@ -338,7 +331,5 @@ else:
 files.download(vec_norm_path)
 print("vec_normalize.pkl indirildi!")
 
-print("\nIndirilen IKI dosyayi da projenizin models/ klasorune koyun:")
-print("   models/best_model.zip")
-print("   models/vec_normalize.pkl")
-print("   Sonra lokal makinenizde: python backtest.py")
+print("\nIndirilen dosyalari models/ klasorune koyun, sonra:")
+print("  python backtest.py")

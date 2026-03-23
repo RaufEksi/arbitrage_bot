@@ -1,14 +1,19 @@
 import os
 import numpy as np
+import pandas as pd
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.callbacks import EvalCallback
-from stable_baselines3.common.env_util import make_vec_env
 
 from env import OFITradingEnv
 from logger import get_logger
 
 logger = get_logger("TrainAgent")
+
+# Configuration
+MODELS_DIR = "./models/"
+LOGS_DIR = "./logs/"
+DATA_PATH = "./data/btcusdt_ofi_data.csv"
 
 # Directory setup for Saving Models and TensorBoard Logs
 MODELS_DIR = "./models/"
@@ -17,32 +22,41 @@ os.makedirs(MODELS_DIR, exist_ok=True)
 os.makedirs(LOGS_DIR, exist_ok=True)
 
 
-def make_env():
-    """
-    Creates and returns an instance of the OFITradingEnv.
-    Used by Stable-Baselines3's DummyVecEnv.
-    """
-    return OFITradingEnv(commission_rate=0.0004)
-
-
 def train():
-    logger.info("Initializing Stable-Baselines3 Environment...")
+    logger.info("V4 Training Pipeline with Train/Test Split")
+    
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    
+    # ------------------------------------------------------------------
+    # DATA LOADING & TRAIN/TEST SPLIT (80/20)
+    # ------------------------------------------------------------------
+    if os.path.exists(DATA_PATH):
+        full_df = pd.read_csv(DATA_PATH)
+        split_idx = int(len(full_df) * 0.8)
+        train_df = full_df.iloc[:split_idx].reset_index(drop=True)
+        test_df = full_df.iloc[split_idx:].reset_index(drop=True)
+        logger.info(f"Real data loaded: {len(full_df):,} rows -> "
+                     f"Train: {len(train_df):,} | Test: {len(test_df):,}")
+        
+        def make_train_env():
+            return OFITradingEnv(commission_rate=0.0004, df=train_df)
+        def make_eval_env():
+            return OFITradingEnv(commission_rate=0.0004, df=test_df)
+    else:
+        logger.warning(f"Real data not found at {DATA_PATH}. Using synthetic mode.")
+        def make_train_env():
+            return OFITradingEnv(commission_rate=0.0004)
+        def make_eval_env():
+            return OFITradingEnv(commission_rate=0.0004)
     
     # ------------------------------------------------------------------
     # ENVIRONMENT WRAPPING: DummyVecEnv -> VecNormalize
     # ------------------------------------------------------------------
-    # 1. Wrap in DummyVecEnv (required by SB3)
-    env = DummyVecEnv([make_env])
-    eval_env = DummyVecEnv([make_env])
-    
-    # 2. VecNormalize: Normalizes observations and rewards on-the-fly
-    #    - norm_obs=True:  Normalizes OFI (scale ~0-10) and Spread (scale ~0.01)
-    #                      to the same magnitude, preventing network blindness
-    #    - norm_reward=True: Stabilizes reward signal for PPO gradient updates
-    #    - clip_obs=10.0:  Clips extreme outlier observations (flash crashes etc.)
+    env = DummyVecEnv([make_train_env])
+    eval_env = DummyVecEnv([make_eval_env])
     env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0)
     eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, clip_obs=10.0)
-    
     logger.info("VecNormalize active: norm_obs=True, norm_reward=True, clip_obs=10.0")
     
     # ------------------------------------------------------------------
@@ -64,18 +78,18 @@ def train():
     # and premature convergence to local optima (like always holding), 
     # we tune PPO's hyperparameters:
     
-    logger.info("Setting up PPO Agent (V2 Hyperparameters)...")
+    logger.info("Setting up PPO Agent (V4 Hyperparameters)...")
     model = PPO(
         "MlpPolicy",
         env,
-        learning_rate=1e-4,        # V2: Slower, more stable convergence
-        n_steps=4096,              # V2: Longer rollouts = more stable gradients
-        batch_size=128,            # V2: Larger batch for 12-dim state
+        learning_rate=1e-4,
+        n_steps=4096,
+        batch_size=128,
         n_epochs=10,
-        gamma=0.95,                # V2: HFT doesn't need distant future (was 0.99)
+        gamma=0.95,
         gae_lambda=0.95,
         clip_range=0.2,
-        ent_coef=0.02,             # V2: More exploration to prevent premature convergence
+        ent_coef=0.05,             # V4: Higher exploration (was 0.02)
         verbose=1,
         tensorboard_log=LOGS_DIR
     )
