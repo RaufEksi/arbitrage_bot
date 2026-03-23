@@ -3,6 +3,7 @@ websockets==12.0
 orjson
 gymnasium
 numpy
+pandas
 stable-baselines3[extra]
 tensorboard
 matplotlib

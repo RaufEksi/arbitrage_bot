@@ -1,5 +1,6 @@
 import os
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from collections import Counter
 from stable_baselines3 import PPO
@@ -18,19 +19,13 @@ def generate_test_data(steps=1000):
     np.random.seed(42)  # For deterministic behavior
     data = []
     
-    # Starting values for BTC-like simulation
     mid_price = 70000.0
     spread = 0.5
     
     for _ in range(steps):
-        # Simulate OFI as a noisy mean-reverting signal
         ofi = np.random.normal(loc=0.0, scale=3.0) 
-        
-        # Price tends to move in the direction of OFI (market impact)
         price_change = (ofi * 0.1) + np.random.normal(loc=0, scale=0.5)
         mid_price += price_change
-        
-        # Introduce some spread variance
         spread = max(0.1, np.random.normal(loc=0.5, scale=0.2))
         
         bid = round(mid_price - (spread / 2.0), 2)
@@ -44,6 +39,10 @@ def run_backtest(model_path, data, vec_normalize_path=None):
     """
     Simulates trading over a given dataset and returns the history.
     Uses VecNormalize stats if available for proper observation scaling.
+    
+    'data' can be:
+      - list of tuples (ofi, bid, ask)  -- synthetic mode
+      - pd.DataFrame with required columns -- real data mode
     """
     logger.info(f"Loading trained model from: {model_path}")
     try:
@@ -52,19 +51,21 @@ def run_backtest(model_path, data, vec_normalize_path=None):
         logger.error(f"Failed to load model from {model_path}. Ensure you have trained it first! Error: {e}")
         return None, None, None
     
-    # ------------------------------------------------------------------
-    # ENVIRONMENT SETUP WITH VECNORMALIZE (Inference Mode)
-    # ------------------------------------------------------------------
-    # We need a raw OFITradingEnv to push market data manually,
-    # BUT we also need VecNormalize to scale observations for the model.
-    raw_env = OFITradingEnv(commission_rate=0.0004, max_steps=0)  # max_steps=0 = no truncation
+    # Determine data mode
+    use_dataframe = isinstance(data, pd.DataFrame)
+    
+    if use_dataframe:
+        raw_env = OFITradingEnv(commission_rate=0.0004, df=data)
+        total_steps = len(data) - 1
+    else:
+        raw_env = OFITradingEnv(commission_rate=0.0004, max_steps=0)
+        total_steps = len(data)
+    
     vec_env = DummyVecEnv([lambda: raw_env])
     
     if vec_normalize_path and os.path.exists(vec_normalize_path):
         vec_env = VecNormalize.load(vec_normalize_path, vec_env)
-        # CRITICAL: Freeze normalization stats during testing
         vec_env.training = False
-        # Show raw (un-normalized) rewards for realistic PnL reporting
         vec_env.norm_reward = False
         logger.info(f"VecNormalize stats loaded from: {vec_normalize_path} (training=False)")
     else:
@@ -72,28 +73,27 @@ def run_backtest(model_path, data, vec_normalize_path=None):
     
     obs = vec_env.reset()
     
-    # Tracking metrics
     actions_taken = []
     rewards_history = []
     cumulative_pnl = [0.0]
     cumulative_raw_reward = 0.0
     
-    logger.info(f"Starting deterministic simulation for {len(data)} steps...")
+    logger.info(f"Starting deterministic simulation for {total_steps} steps...")
     
-    for step_idx, (ofi, bid, ask) in enumerate(data):
-        # 1. Update Market Context on the RAW (inner) environment
-        raw_env.update_market_data(ofi=ofi, bid=bid, ask=ask)
+    for step_idx in range(total_steps):
+        # In synthetic mode, push data manually
+        if not use_dataframe:
+            ofi, bid, ask = data[step_idx]
+            raw_env.update_market_data(ofi=ofi, bid=bid, ask=ask)
         
-        # 2. Get the normalized observation through VecNormalize
-        #    VecNormalize will scale the raw state using training stats
+        # Get normalized observation
         obs = vec_env.normalize_obs(np.array([raw_env.state]))
         
-        # 3. Agent predicts action deterministically
         action, _states = model.predict(obs, deterministic=True)
         action_val = int(action[0])
         actions_taken.append(action_val)
         
-        # 4. Execute action on the RAW env to get true (un-normalized) reward
+        # In DataFrame mode, step() calls _load_tick_from_df() internally
         raw_obs, reward, terminated, truncated, info = raw_env.step(action_val)
         
         rewards_history.append(reward)
@@ -121,18 +121,17 @@ def calculate_sharpe(rewards, annualization_factor):
     sharpe = (mean_return / std_return) * np.sqrt(annualization_factor)
     return sharpe
 
-def plot_equity_curve(cumulative_pnl):
+def plot_equity_curve(cumulative_pnl, data_source=""):
     """
     Plots and saves the equity curve using Matplotlib.
     """
     try:
         plt.figure(figsize=(10, 6))
         plt.plot(cumulative_pnl, label="Cumulative PnL (Rewards)", color="#1f77b4", linewidth=2)
-        
-        # Fill area under curve
         plt.fill_between(range(len(cumulative_pnl)), cumulative_pnl, color="#1f77b4", alpha=0.1)
         
-        plt.title("HFT Agent Equity Curve (Backtest on Test Dataset)", fontsize=14, pad=15)
+        title = f"HFT Agent Equity Curve ({data_source})"
+        plt.title(title, fontsize=14, pad=15)
         plt.xlabel("Timesteps (Ticks)", fontsize=12)
         plt.ylabel("Cumulative Net Return", fontsize=12)
         plt.grid(True, linestyle="--", alpha=0.6)
@@ -147,46 +146,50 @@ def plot_equity_curve(cumulative_pnl):
         logger.error(f"Failed to plot equity curve: {e}")
 
 if __name__ == "__main__":
-    # Backtest Configuration
     MODELS_DIR = "./models/"
+    DATA_DIR = "./data/"
     MODEL_PATH = os.path.join(MODELS_DIR, "best_model.zip")
     VEC_NORMALIZE_PATH = os.path.join(MODELS_DIR, "vec_normalize.pkl")
+    REAL_DATA_PATH = os.path.join(DATA_DIR, "btcusdt_ofi_data.csv")
     
-    # Fallback to final model if best model is missing
     if not os.path.exists(MODEL_PATH):
         logger.warning("best_model.zip not found. Falling back to final_trading_model.zip")
         MODEL_PATH = os.path.join(MODELS_DIR, "final_trading_model.zip")
-        
-    STEPS = 5000
     
-    # 1. Generate Fake HFT Data 
-    logger.info("Generating continuous synthetic backtest data...")
-    test_data = generate_test_data(steps=STEPS)
+    # ------------------------------------------------------------------
+    # DATA SOURCE: Real CSV if available, otherwise synthetic
+    # ------------------------------------------------------------------
+    if os.path.exists(REAL_DATA_PATH):
+        logger.info(f"Real market data found: {REAL_DATA_PATH}")
+        test_data = pd.read_csv(REAL_DATA_PATH)
+        logger.info(f"Loaded {len(test_data):,} rows from real market data.")
+        data_source = "Real Binance Data"
+    else:
+        logger.info("No real data found. Generating synthetic backtest data...")
+        STEPS = 5000
+        test_data = generate_test_data(steps=STEPS)
+        data_source = "Synthetic Data"
     
-    # 2. Run Backtest simulation (with VecNormalize stats)
+    # Run backtest
     actions, cum_pnl, step_rewards = run_backtest(MODEL_PATH, test_data, VEC_NORMALIZE_PATH)
     
     if actions and cum_pnl:
-        # 3. Calculate metrics
         action_counts = Counter(actions)
         total_profit = cum_pnl[-1]
         
-        # Annualization factor requested: sqrt(252 * 24 * 60)
-        # We pass 252 * 24 * 60 inside the sqrt calculation
         ANNUALIZATION_FACTOR = 252 * 24 * 60
         sharpe_ratio = calculate_sharpe(step_rewards, ANNUALIZATION_FACTOR)
         
-        # 4. Display terminal report
-        logger.info("\n========== BACKTEST RESULTS ==========")
+        logger.info(f"\n========== BACKTEST RESULTS ({data_source}) ==========")
         logger.info(f"Total Steps        : {len(actions)}")
         logger.info(f"Net Profit/Reward  : {total_profit:>.5f}")
         logger.info(f"Ann. Sharpe Ratio  : {sharpe_ratio:>.3f}")
-        logger.info("-" * 38)
+        logger.info("-" * 50)
         logger.info("Action Distribution:")
         logger.info(f"  Hold (0) : {action_counts.get(0, 0)}")
         logger.info(f"  Buy  (1) : {action_counts.get(1, 0)}")
         logger.info(f"  Sell (2) : {action_counts.get(2, 0)}")
-        logger.info("======================================")
+        logger.info("=" * 50)
         
-        # 5. Visualization
-        plot_equity_curve(cum_pnl)
+        plot_equity_curve(cum_pnl, data_source)
+

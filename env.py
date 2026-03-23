@@ -1,6 +1,7 @@
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
+import pandas as pd
 from collections import deque
 from typing import Optional, Dict, Any, Tuple
 from logger import get_logger
@@ -50,12 +51,26 @@ class OFITradingEnv(gym.Env):
     OFI_LOOKBACK = 5                # Number of past OFI values in state
     EMA_SPAN = 20                   # Span for OFI EMA calculation
     
-    def __init__(self, commission_rate: float = 0.0004, render_mode: Optional[str] = None, max_steps: int = 10000):
+    def __init__(self, commission_rate: float = 0.0004, render_mode: Optional[str] = None,
+                 max_steps: int = 10000, df: Optional[pd.DataFrame] = None):
         super(OFITradingEnv, self).__init__()
         
         self.commission_rate = commission_rate
         self.render_mode = render_mode
-        self.max_steps = max_steps
+        
+        # --- DataFrame Mode ---
+        # When df is provided, the environment reads market data from the DataFrame
+        # at each step. When df is None, it works in live/manual mode via update_market_data().
+        self.df = df
+        if self.df is not None:
+            required_cols = {"bid_price", "ask_price", "ofi", "spread"}
+            missing = required_cols - set(self.df.columns)
+            if missing:
+                raise ValueError(f"DataFrame missing required columns: {missing}")
+            self.max_steps = len(self.df) - 1  # Auto-detect from data length
+            logger.info(f"DataFrame mode: {len(self.df):,} rows loaded, max_steps={self.max_steps}")
+        else:
+            self.max_steps = max_steps
         
         # Actions: 0 (Hold), 1 (Buy), 2 (Sell)
         self.action_space = spaces.Discrete(3)
@@ -157,6 +172,10 @@ class OFITradingEnv(gym.Env):
         """
         self.current_step += 1
         self.holding_time += 1
+        
+        # --- Load market data from DataFrame if available ---
+        if self.df is not None:
+            self._load_tick_from_df()
         
         prev_position = self.current_position
         step_reward = 0.0
@@ -275,10 +294,26 @@ class OFITradingEnv(gym.Env):
             
         return self.state, float(step_reward), terminated, truncated, info
 
+    def _load_tick_from_df(self):
+        """
+        Reads the current tick's market data from the internal DataFrame.
+        Called automatically at the start of each step() when in DataFrame mode.
+        """
+        idx = min(self.current_step, len(self.df) - 1)
+        row = self.df.iloc[idx]
+        
+        ofi = float(row["ofi"])
+        bid = float(row["bid_price"])
+        ask = float(row["ask_price"])
+        
+        # Delegate to existing update logic for consistency
+        self.update_market_data(ofi=ofi, bid=bid, ask=ask)
+
     def update_market_data(self, ofi: float, bid: float, ask: float):
         """
         Injects real-time WebSocket data into the environment.
         Updates OFI history, EMA, and recalculates PnL.
+        Also called internally by _load_tick_from_df() in DataFrame mode.
         """
         self.latest_ofi = ofi
         self.latest_bid = bid
@@ -288,7 +323,7 @@ class OFITradingEnv(gym.Env):
         # Append to OFI history for lookback window
         self.ofi_history.append(ofi)
         
-        # Update EMA: EMA_t = α * OFI_t + (1-α) * EMA_{t-1}
+        # Update EMA: EMA_t = alpha * OFI_t + (1-alpha) * EMA_{t-1}
         self.ofi_ema = self.ema_alpha * ofi + (1 - self.ema_alpha) * self.ofi_ema
         
         # Recalculate unrealized PnL
