@@ -258,10 +258,13 @@ print(f"\nKolon kontrolu GECTI. Veriye hazir!")
 
 # --- CELL 4: GERCEK VERI ILE EGITIM ---
 import numpy as np
+import importlib
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.callbacks import EvalCallback
 
+import ofi_env
+importlib.reload(ofi_env)  # Colab eski modulu cache'ler, reload sart
 from ofi_env import OFITradingEnv
 
 MODELS_DIR = "./models/"
