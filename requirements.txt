@@ -1,0 +1,8 @@
+aiohttp==3.9.3
+websockets==12.0
+orjson
+gymnasium
+numpy
+stable-baselines3[extra]
+tensorboard
+matplotlib
