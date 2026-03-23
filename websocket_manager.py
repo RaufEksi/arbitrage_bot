@@ -29,10 +29,18 @@ class BinanceWSManager:
                     logger.info("WebSocket connection established.")
                     self.reconnect_delay = 1.0  # Reset reconnect delay on success
                     
-                    # Connection successful, start synchronizing the orderbook in the background
-                    asyncio.create_task(self.orderbook.sync_book())
+                    # Synchronize the orderbook BEFORE processing live data.
+                    # Await explicitly to prevent race condition (incomplete book).
+                    try:
+                        sync_success = await self.orderbook.sync_book()
+                        if not sync_success:
+                            logger.error("Orderbook snapshot sync returned False. Aborting stream.")
+                            continue  # triggers reconnect
+                    except Exception as sync_err:
+                        logger.error(f"Orderbook sync failed: {sync_err}. Aborting stream.")
+                        continue  # triggers reconnect
                     
-                    # Start listening to the stream
+                    # Orderbook is synchronized — safe to process live stream
                     await self._listen_stream(ws)
 
             except Exception as e:

@@ -121,11 +121,11 @@ class OFITradingEnv(gym.Env):
         self.update_market_data(float(row["ofi"]), float(row["bid_price"]), float(row["ask_price"]))
 
     def step(self, action):
-        self.current_step += 1
-        self.holding_time += 1
-        
         if self.df is not None:
             self._load_tick_from_df()
+        
+        self.current_step += 1
+        self.holding_time += 1
         
         prev_position = self.current_position
         step_reward = 0.0

@@ -127,59 +127,65 @@ def train():
 
 def evaluate_model(model_path: str, steps: int = 10):
     """
-    Loads a trained model and evaluates it using dummy environment data
+    Loads a trained model and evaluates it with VecNormalize-scaled observations.
     """
     logger.info("====================================")
     logger.info(f"Evaluating Model: {model_path}")
     logger.info("====================================")
     
-    # Load model
     try:
         model = PPO.load(model_path)
     except Exception as e:
         logger.error(f"Failed to load model from {model_path}: {e}")
         return
-        
-    # Standard non-vectorized env to push dummy market data manually
-    test_env = OFITradingEnv(commission_rate=0.0004, render_mode="ansi")
-    obs, info = test_env.reset()
     
-    # Simulating 10 ticks of market data manually for the evaluation
-    # Format: (OFI, Bid, Ask)
+    # Create raw env and wrap with VecNormalize (inference mode)
+    raw_env = OFITradingEnv(commission_rate=0.0004, render_mode="ansi")
+    vec_env = DummyVecEnv([lambda: raw_env])
+    
+    vec_norm_path = os.path.join(MODELS_DIR, "vec_normalize.pkl")
+    if os.path.exists(vec_norm_path):
+        vec_env = VecNormalize.load(vec_norm_path, vec_env)
+        vec_env.training = False      # Freeze normalization stats
+        vec_env.norm_reward = False    # Show raw rewards
+        logger.info(f"VecNormalize stats loaded for evaluation (training=False)")
+    else:
+        logger.warning("No VecNormalize stats found! Agent will see raw observations.")
+    
+    obs = vec_env.reset()
+    
     dummy_market_data = [
-        ( 1.5, 70000.0, 70000.1),  # Mild Buy
-        ( 5.0, 70000.5, 70000.6),  # Strong Buy
-        ( 6.0, 70001.0, 70001.2),  # Very Strong Buy
-        (-0.5, 70002.0, 70002.1),  # Flattening
-        (-3.0, 70000.0, 70000.1),  # Strong Sell
-        (-5.0, 69998.0, 69998.1),  # Very Strong Sell
-        ( 0.0, 69995.0, 69995.1),  # Flat
-        ( 4.0, 69996.0, 69996.1),  # Buy Reversal
-        ( 2.0, 69998.0, 69998.1),  # Mild Buy
-        (-1.0, 69999.0, 69999.1),  # Flat
+        ( 1.5, 70000.0, 70000.1),
+        ( 5.0, 70000.5, 70000.6),
+        ( 6.0, 70001.0, 70001.2),
+        (-0.5, 70002.0, 70002.1),
+        (-3.0, 70000.0, 70000.1),
+        (-5.0, 69998.0, 69998.1),
+        ( 0.0, 69995.0, 69995.1),
+        ( 4.0, 69996.0, 69996.1),
+        ( 2.0, 69998.0, 69998.1),
+        (-1.0, 69999.0, 69999.1),
     ]
     
     for i in range(min(steps, len(dummy_market_data))):
         ofi, bid, ask = dummy_market_data[i]
         
-        # 1. Update Market Env implicitly first (like a websocket would)
-        test_env.update_market_data(ofi=ofi, bid=bid, ask=ask)
+        # 1. Update market data on the raw (inner) environment
+        raw_env.update_market_data(ofi=ofi, bid=bid, ask=ask)
         
-        # We must re-fetch the raw state to feed into the model since market moved
-        # Stable Baselines expects a batched environment input, so we wrap it
-        obs = np.array([test_env.state])
+        # 2. Get normalized observation through VecNormalize
+        obs = vec_env.normalize_obs(np.array([raw_env.state]))
         
-        # 2. Agent decides action deterministically
+        # 3. Agent predicts action using normalized observation
         action, _states = model.predict(obs, deterministic=True)
-        # Unwrap the batched action prediction
         action_val = int(action[0])
         
-        # 3. Environment Step
-        obs, reward, terminated, truncated, info = test_env.step(action_val)
+        # 4. Step the raw env
+        raw_obs, reward, terminated, truncated, info = raw_env.step(action_val)
         
-        # Log
         action_name = ["HOLD", "BUY", "SELL"][action_val]
-        logger.info(f"Tick {i+1} | OFI: {ofi:>4.1f} | Action Given: {action_name:<4} | R: {reward:>.5f} | PnL: {info['pnl']:>.5f}")
+        logger.info(f"Tick {i+1} | OFI: {ofi:>4.1f} | Action: {action_name:<4} | "
+                     f"R: {reward:>.5f} | PnL: {info['pnl']:>.5f}")
         
     logger.info("Evaluation Complete.")
 

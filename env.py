@@ -165,12 +165,13 @@ class OFITradingEnv(gym.Env):
         """
         Executes a single step with V2 reward engineering.
         """
-        self.current_step += 1
-        self.holding_time += 1
-        
-        # --- Load market data from DataFrame if available ---
+        # --- Load market data from DataFrame BEFORE incrementing step ---
+        # This ensures step 0 reads df.iloc[0], step 1 reads df.iloc[1], etc.
         if self.df is not None:
             self._load_tick_from_df()
+        
+        self.current_step += 1
+        self.holding_time += 1
         
         prev_position = self.current_position
         step_reward = 0.0
