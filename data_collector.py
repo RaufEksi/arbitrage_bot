@@ -28,20 +28,19 @@ except ImportError:
     sys.exit(1)
 
 from logger import get_logger
+import config as cfg
 
 logger = get_logger("DataCollector")
 
-# ============================================================
-# Configuration
-# ============================================================
-DATA_DIR = "./data/"
-DEFAULT_SYMBOL = "btcusdt"
-DEFAULT_TICKS = 10_000
-SAVE_INTERVAL = 10_000          # Save to CSV every N ticks
-BINANCE_WS_URL = "wss://stream.binance.com:9443/ws/{}@bookTicker"
-RECONNECT_DELAY_SEC = 3
-MAX_RECONNECT_ATTEMPTS = 10
-TPS_LOG_INTERVAL_SEC = 5        # Log ticks-per-second every N seconds
+# Pull from central config
+DATA_DIR = cfg.DATA_DIR
+DEFAULT_SYMBOL = cfg.SYMBOL
+DEFAULT_TICKS = cfg.DEFAULT_TICKS
+SAVE_INTERVAL = cfg.SAVE_INTERVAL
+BINANCE_WS_URL = cfg.BINANCE_WS_BOOKTICKER_URL
+RECONNECT_DELAY_SEC = cfg.RECONNECT_DELAY_SEC
+MAX_RECONNECT_ATTEMPTS = cfg.MAX_RECONNECT_ATTEMPTS
+TPS_LOG_INTERVAL_SEC = cfg.TPS_LOG_INTERVAL_SEC
 
 
 class OFIDataCollector:

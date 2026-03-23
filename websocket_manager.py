@@ -3,7 +3,7 @@ import orjson
 import websockets
 from orderbook import OrderBook
 from ofi_calculator import OFICalculator
-from config import BINANCE_WS_URL_TEMPLATE, SYMBOL
+from config import BINANCE_WS_DEPTH_URL as BINANCE_WS_URL_TEMPLATE, SYMBOL
 from logger import get_logger
 
 logger = get_logger("WebSocketClient")

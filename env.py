@@ -5,6 +5,7 @@ import pandas as pd
 from collections import deque
 from typing import Optional, Dict, Any, Tuple
 from logger import get_logger
+import config as cfg
 
 logger = get_logger("OFITradingEnv")
 
@@ -38,16 +39,16 @@ class OFITradingEnv(gym.Env):
     
     metadata = {"render_modes": ["ansi"]}
     
-    # --- Reward Tuning Constants (V4 — Softened) ---
-    OVERTRADE_WINDOW = 50           # Look at last N ticks for overtrading check
-    OVERTRADE_MAX = 20              # Max trades allowed in the window
-    OVERTRADE_PENALTY = 0.0003      # V4: Softened (was 0.001)
-    REDUNDANT_PENALTY = 0.0003      # V4: Softened (was 0.0008)
-    OFI_LOOKBACK = 5                # Number of past OFI values in state
-    EMA_SPAN = 20                   # Span for OFI EMA calculation
+    # --- Reward Tuning Constants (from config.py) ---
+    OVERTRADE_WINDOW = cfg.OVERTRADE_WINDOW
+    OVERTRADE_MAX = cfg.OVERTRADE_MAX
+    OVERTRADE_PENALTY = cfg.OVERTRADE_PENALTY
+    REDUNDANT_PENALTY = cfg.REDUNDANT_PENALTY
+    OFI_LOOKBACK = cfg.OFI_LOOKBACK
+    EMA_SPAN = cfg.EMA_SPAN
     
-    def __init__(self, commission_rate: float = 0.0004, render_mode: Optional[str] = None,
-                 max_steps: int = 10000, df: Optional[pd.DataFrame] = None):
+    def __init__(self, commission_rate: float = cfg.COMMISSION_RATE, render_mode: Optional[str] = None,
+                 max_steps: int = cfg.DEFAULT_MAX_STEPS, df: Optional[pd.DataFrame] = None):
         super(OFITradingEnv, self).__init__()
         
         self.commission_rate = commission_rate
@@ -70,10 +71,9 @@ class OFITradingEnv(gym.Env):
         # Actions: 0 (Hold), 1 (Buy), 2 (Sell)
         self.action_space = spaces.Discrete(3)
         
-        # State: 12-dimensional observation space
-        OBS_DIM = 12
-        low = np.full(OBS_DIM, -np.inf, dtype=np.float32)
-        high = np.full(OBS_DIM, np.inf, dtype=np.float32)
+        # State: observation space
+        low = np.full(cfg.OBS_DIM, -np.inf, dtype=np.float32)
+        high = np.full(cfg.OBS_DIM, np.inf, dtype=np.float32)
         # Clamp known bounded features
         low[8] = -1.0   # Position
         high[8] = 1.0
@@ -90,7 +90,7 @@ class OFITradingEnv(gym.Env):
         self.trade_history: deque = deque(maxlen=self.OVERTRADE_WINDOW)
         
         # State variables
-        self.state: np.ndarray = np.zeros(OBS_DIM, dtype=np.float32)
+        self.state: np.ndarray = np.zeros(cfg.OBS_DIM, dtype=np.float32)
         self.current_position: int = 0
         self.entry_price: float = 0.0
         self.cumulative_reward: float = 0.0
@@ -128,7 +128,7 @@ class OFITradingEnv(gym.Env):
         self.latest_bid = 0.0
         self.latest_ask = 0.0
         
-        self.state = np.zeros(12, dtype=np.float32)
+        self.state = np.zeros(cfg.OBS_DIM, dtype=np.float32)
         
         logger.info("Environment reset to flat state.")
         return self.state, {}
@@ -273,7 +273,7 @@ class OFITradingEnv(gym.Env):
         # Termination conditions
         terminated = False
         truncated = False
-        if unrealized_pnl < -0.05:
+        if unrealized_pnl < cfg.STOP_LOSS_THRESHOLD:
             terminated = True
             logger.warning("Stop loss triggered! Episode terminated.")
             

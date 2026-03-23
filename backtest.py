@@ -6,6 +6,7 @@ from collections import Counter
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
+import config as cfg
 from env import OFITradingEnv
 from logger import get_logger
 
@@ -55,10 +56,10 @@ def run_backtest(model_path, data, vec_normalize_path=None):
     use_dataframe = isinstance(data, pd.DataFrame)
     
     if use_dataframe:
-        raw_env = OFITradingEnv(commission_rate=0.0004, df=data)
+        raw_env = OFITradingEnv(df=data)
         total_steps = len(data) - 1
     else:
-        raw_env = OFITradingEnv(commission_rate=0.0004, max_steps=0)
+        raw_env = OFITradingEnv(max_steps=0)
         total_steps = len(data)
     
     vec_env = DummyVecEnv([lambda: raw_env])
@@ -146,31 +147,28 @@ def plot_equity_curve(cumulative_pnl, data_source=""):
         logger.error(f"Failed to plot equity curve: {e}")
 
 if __name__ == "__main__":
-    MODELS_DIR = "./models/"
-    DATA_DIR = "./data/"
-    MODEL_PATH = os.path.join(MODELS_DIR, "best_model.zip")
-    VEC_NORMALIZE_PATH = os.path.join(MODELS_DIR, "vec_normalize.pkl")
-    REAL_DATA_PATH = os.path.join(DATA_DIR, "btcusdt_ofi_data.csv")
+    MODEL_PATH = os.path.join(cfg.MODELS_DIR, "best_model.zip")
+    VEC_NORMALIZE_PATH = os.path.join(cfg.MODELS_DIR, "vec_normalize.pkl")
+    REAL_DATA_PATH = cfg.DATA_PATH
     
     if not os.path.exists(MODEL_PATH):
         logger.warning("best_model.zip not found. Falling back to final_trading_model.zip")
-        MODEL_PATH = os.path.join(MODELS_DIR, "final_trading_model.zip")
+        MODEL_PATH = os.path.join(cfg.MODELS_DIR, "final_trading_model.zip")
     
     # ------------------------------------------------------------------
-    # DATA SOURCE: Real CSV if available, otherwise synthetic
+    # DATA SOURCE: Real CSV (out-of-sample) if available, else synthetic
     # ------------------------------------------------------------------
     if os.path.exists(REAL_DATA_PATH):
         logger.info(f"Real market data found: {REAL_DATA_PATH}")
         full_df = pd.read_csv(REAL_DATA_PATH)
-        split_idx = int(len(full_df) * 0.8)
+        split_idx = int(len(full_df) * cfg.TRAIN_TEST_SPLIT)
         test_data = full_df.iloc[split_idx:].reset_index(drop=True)
         logger.info(f"Out-of-sample test: last {len(test_data):,} rows "
-                     f"(of {len(full_df):,} total, 20% split).")
+                     f"(of {len(full_df):,} total).")
         data_source = "Real Binance Data (Out-of-Sample)"
     else:
         logger.info("No real data found. Generating synthetic backtest data...")
-        STEPS = 5000
-        test_data = generate_test_data(steps=STEPS)
+        test_data = generate_test_data(steps=cfg.SYNTHETIC_BACKTEST_STEPS)
         data_source = "Synthetic Data"
     
     # Run backtest
@@ -180,7 +178,7 @@ if __name__ == "__main__":
         action_counts = Counter(actions)
         total_profit = cum_pnl[-1]
         
-        ANNUALIZATION_FACTOR = 252 * 24 * 60
+        ANNUALIZATION_FACTOR = cfg.ANNUALIZATION_FACTOR
         sharpe_ratio = calculate_sharpe(step_rewards, ANNUALIZATION_FACTOR)
         
         logger.info(f"\n========== BACKTEST RESULTS ({data_source}) ==========")
