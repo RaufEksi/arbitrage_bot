@@ -27,9 +27,9 @@ from logger import get_logger
 logger = get_logger("HistoricalDownloader")
 
 SYMBOL = cfg.SYMBOL.upper()
-AGG_TRADES_URL = "https://api.binance.com/api/v3/aggTrades"
-BOOK_TICKER_URL = "https://api.binance.com/api/v3/ticker/bookTicker"
-DEPTH_URL = "https://api.binance.com/api/v3/depth"
+AGG_TRADES_URL = "https://data-api.binance.vision/api/v3/aggTrades"
+BOOK_TICKER_URL = "https://data-api.binance.vision/api/v3/ticker/bookTicker"
+DEPTH_URL = "https://data-api.binance.vision/api/v3/depth"
 MAX_PER_REQUEST = 1000
 RATE_LIMIT_SLEEP = 0.1  # 100ms between requests (safe for 1200 req/min limit)
 
