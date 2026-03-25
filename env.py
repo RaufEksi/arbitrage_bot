@@ -12,7 +12,7 @@ logger = get_logger("OFITradingEnv")
 
 class OFITradingEnv(gym.Env):
     """
-    V2 HFT Trading Environment with enriched state space and reward engineering.
+    V4 HFT Trading Environment — Performance Optimized.
     
     Observation Space (12-dim Continuous):
         [0-4]:  OFI lookback window (last 5 ticks)
@@ -39,7 +39,7 @@ class OFITradingEnv(gym.Env):
     
     metadata = {"render_modes": ["ansi"]}
     
-    # --- Reward Tuning Constants (from config.py) ---
+    # --- Constants from config.py ---
     OVERTRADE_WINDOW = cfg.OVERTRADE_WINDOW
     OVERTRADE_MAX = cfg.OVERTRADE_MAX
     OVERTRADE_PENALTY = cfg.OVERTRADE_PENALTY
@@ -54,27 +54,22 @@ class OFITradingEnv(gym.Env):
         self.commission_rate = commission_rate
         self.render_mode = render_mode
         
-        # --- DataFrame Mode ---
-        # When df is provided, the environment reads market data from the DataFrame
-        # at each step. When df is None, it works in live/manual mode via update_market_data().
-        self.df = df
+        # --- DataFrame Mode: pre-cache as numpy for O(1) access ---
         self._df_ofi = None
         self._df_bid = None
         self._df_ask = None
         self._df_len = 0
         
-        if self.df is not None:
+        if df is not None:
             required_cols = {"bid_price", "ask_price", "ofi", "spread"}
-            missing = required_cols - set(self.df.columns)
+            missing = required_cols - set(df.columns)
             if missing:
                 raise ValueError(f"DataFrame missing required columns: {missing}")
-            # Pre-cache as numpy arrays for O(1) access (eliminates iloc overhead)
-            self._df_ofi = self.df["ofi"].to_numpy(dtype=np.float64)
-            self._df_bid = self.df["bid_price"].to_numpy(dtype=np.float64)
-            self._df_ask = self.df["ask_price"].to_numpy(dtype=np.float64)
-            self._df_len = len(self.df)
+            self._df_ofi = df["ofi"].to_numpy(dtype=np.float64)
+            self._df_bid = df["bid_price"].to_numpy(dtype=np.float64)
+            self._df_ask = df["ask_price"].to_numpy(dtype=np.float64)
+            self._df_len = len(df)
             self.max_steps = self._df_len - 1
-            self.df = None  # Free DataFrame memory
             logger.info(f"DataFrame mode: {self._df_len:,} rows cached as numpy, max_steps={self.max_steps}")
         else:
             self.max_steps = max_steps
@@ -85,36 +80,44 @@ class OFITradingEnv(gym.Env):
         # State: observation space
         low = np.full(cfg.OBS_DIM, -np.inf, dtype=np.float32)
         high = np.full(cfg.OBS_DIM, np.inf, dtype=np.float32)
-        # Clamp known bounded features
-        low[8] = -1.0   # Position
+        low[8] = -1.0
         high[8] = 1.0
-        low[10] = 0.0   # Holding time (normalized)
+        low[10] = 0.0
         high[10] = 1.0
-        low[11] = 0.0   # Step progress
+        low[11] = 0.0
         high[11] = 1.0
         self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
         
-        # Internal buffers
-        self.ofi_history: deque = deque(maxlen=self.OFI_LOOKBACK)
+        # --- Performance: numpy ring buffers instead of deque ---
+        self._ofi_buf = np.zeros(self.OFI_LOOKBACK, dtype=np.float64)
+        self._ofi_ptr = 0
+        self._ofi_count = 0
+        
+        self._trade_buf = np.zeros(self.OVERTRADE_WINDOW, dtype=np.int8)
+        self._trade_ptr = 0
+        self._trade_running_sum = 0  # O(1) trade count
+        
         self.ofi_ema: float = 0.0
         self.ema_alpha: float = 2.0 / (self.EMA_SPAN + 1)
-        self.trade_history: deque = deque(maxlen=self.OVERTRADE_WINDOW)
         
-        # State variables
-        self.state: np.ndarray = np.zeros(cfg.OBS_DIM, dtype=np.float32)
+        # Pre-allocated state array (in-place writes, zero allocation per step)
+        self.state = np.zeros(cfg.OBS_DIM, dtype=np.float32)
         self.current_position: int = 0
         self.entry_price: float = 0.0
         self.cumulative_reward: float = 0.0
         self.current_step: int = 0
         self.prev_unrealized_pnl: float = 0.0
-        self.holding_time: int = 0       # Ticks since last position change
-        self.prev_spread: float = 0.0    # For spread delta
+        self.holding_time: int = 0
+        self.prev_spread: float = 0.0
         
         # Latest market data
         self.latest_ofi: float = 0.0
         self.latest_bid: float = 0.0
         self.latest_ask: float = 0.0
         self.latest_spread: float = 0.0
+        
+        # Cache for step()
+        self._inv_max_steps = 1.0 / max(self.max_steps, 1)
         
     def reset(self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
         """Resets the environment to an initial state."""
@@ -129,136 +132,138 @@ class OFITradingEnv(gym.Env):
         self.prev_spread = 0.0
         self.ofi_ema = 0.0
         
-        self.ofi_history.clear()
-        self.trade_history.clear()
-        for _ in range(self.OFI_LOOKBACK):
-            self.ofi_history.append(0.0)
+        self._ofi_buf[:] = 0.0
+        self._ofi_ptr = 0
+        self._ofi_count = 0
+        
+        self._trade_buf[:] = 0
+        self._trade_ptr = 0
+        self._trade_running_sum = 0
         
         self.latest_ofi = 0.0
         self.latest_spread = 0.0
         self.latest_bid = 0.0
         self.latest_ask = 0.0
         
-        self.state = np.zeros(cfg.OBS_DIM, dtype=np.float32)
+        self.state[:] = 0.0
+        self._inv_max_steps = 1.0 / max(self.max_steps, 1)
         
         logger.info("Environment reset to flat state.")
         return self.state, {}
 
-    def _build_state(self, unrealized_pnl: float) -> np.ndarray:
-        """Constructs the 12-dimensional observation vector."""
-        # OFI lookback (pad with zeros if not enough history)
-        ofi_window = list(self.ofi_history)
+    def _write_state(self, unrealized_pnl: float):
+        """Writes observation into pre-allocated state array (zero allocation)."""
+        s = self.state
+        buf = self._ofi_buf
+        ptr = self._ofi_ptr
+        lb = self.OFI_LOOKBACK
         
-        # Spread change rate
-        spread_delta = (self.latest_spread - self.prev_spread) if self.prev_spread > 0 else 0.0
+        # OFI lookback: read circular buffer in order
+        for i in range(lb):
+            s[i] = buf[(ptr - lb + i) % lb]
         
-        # Normalize holding time and step progress
-        max_s = self.max_steps if self.max_steps > 0 else 10000
-        holding_norm = min(self.holding_time / max_s, 1.0)
-        step_progress = min(self.current_step / max_s, 1.0)
-        
-        return np.array([
-            ofi_window[-5] if len(ofi_window) >= 5 else 0.0,   # [0] OFI t-4
-            ofi_window[-4] if len(ofi_window) >= 4 else 0.0,   # [1] OFI t-3
-            ofi_window[-3] if len(ofi_window) >= 3 else 0.0,   # [2] OFI t-2
-            ofi_window[-2] if len(ofi_window) >= 2 else 0.0,   # [3] OFI t-1
-            ofi_window[-1] if len(ofi_window) >= 1 else 0.0,   # [4] OFI t (current)
-            self.ofi_ema,                                        # [5] OFI EMA-20
-            self.latest_spread,                                  # [6] Spread
-            spread_delta,                                        # [7] ΔSpread
-            float(self.current_position),                        # [8] Position
-            unrealized_pnl,                                      # [9] Unrealized PnL
-            holding_norm,                                        # [10] Holding time
-            step_progress,                                       # [11] Step progress
-        ], dtype=np.float32)
+        s[5] = self.ofi_ema
+        s[6] = self.latest_spread
+        s[7] = (self.latest_spread - self.prev_spread) if self.prev_spread > 0 else 0.0
+        s[8] = float(self.current_position)
+        s[9] = unrealized_pnl
+        s[10] = min(self.holding_time * self._inv_max_steps, 1.0)
+        s[11] = min(self.current_step * self._inv_max_steps, 1.0)
+
+    def _push_ofi(self, ofi: float):
+        """Appends OFI to circular buffer and updates EMA. O(1)."""
+        self._ofi_buf[self._ofi_ptr] = ofi
+        self._ofi_ptr = (self._ofi_ptr + 1) % self.OFI_LOOKBACK
+        if self._ofi_count < self.OFI_LOOKBACK:
+            self._ofi_count += 1
+        self.ofi_ema = self.ema_alpha * ofi + (1.0 - self.ema_alpha) * self.ofi_ema
+
+    def _push_trade(self, traded: int):
+        """Adds trade flag to ring buffer with O(1) running sum."""
+        old_val = self._trade_buf[self._trade_ptr]
+        self._trade_running_sum += traded - old_val
+        self._trade_buf[self._trade_ptr] = traded
+        self._trade_ptr = (self._trade_ptr + 1) % self.OVERTRADE_WINDOW
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
-        """
-        Executes a single step with V2 reward engineering.
-        """
-        # --- Load market data from numpy cache BEFORE incrementing step ---
+        """Executes a single step. Performance-optimized inner loop."""
+        
+        # --- Load market data from numpy cache (inline, no function call) ---
         if self._df_ofi is not None:
-            self._load_tick_from_df()
+            idx = self.current_step if self.current_step < self._df_len else self._df_len - 1
+            ofi = self._df_ofi[idx]
+            bid = self._df_bid[idx]
+            ask = self._df_ask[idx]
+            self.latest_ofi = ofi
+            self.latest_bid = bid
+            self.latest_ask = ask
+            self.latest_spread = ask - bid
+            self._push_ofi(ofi)
         
         self.current_step += 1
         self.holding_time += 1
         
-        prev_position = self.current_position
         step_reward = 0.0
         trade_executed = False
         realized_pnl = 0.0
         
-        # ----------------------------------------------------------
         # 1. DIFFERENTIAL HOLDING REWARD (ΔPnL)
-        # ----------------------------------------------------------
-        current_unrealized_pnl = 0.0
-        if prev_position == 1 and self.entry_price > 0:
-            current_unrealized_pnl = (self.latest_bid - self.entry_price) / self.entry_price
-        elif prev_position == -1 and self.entry_price > 0:
-            current_unrealized_pnl = (self.entry_price - self.latest_ask) / self.entry_price
+        entry = self.entry_price
+        pos = self.current_position
         
-        delta_pnl = current_unrealized_pnl - self.prev_unrealized_pnl
-        step_reward += delta_pnl
+        current_unrealized_pnl = 0.0
+        if pos == 1 and entry > 0:
+            current_unrealized_pnl = (self.latest_bid - entry) / entry
+        elif pos == -1 and entry > 0:
+            current_unrealized_pnl = (entry - self.latest_ask) / entry
+        
+        step_reward = current_unrealized_pnl - self.prev_unrealized_pnl
 
-        # ----------------------------------------------------------
         # 2. ACTION LOGIC
-        # ----------------------------------------------------------
-        if action == 1:  # Request BUY
-            if self.current_position <= 0:
-                execution_price = self.latest_ask
-                if execution_price > 0:
-                    slippage_cost = self.latest_spread / 2.0 / execution_price
-                    step_reward -= (self.commission_rate + slippage_cost)
-                    
-                    if self.current_position == -1 and self.entry_price > 0:
-                        realized_pnl = (self.entry_price - execution_price) / self.entry_price
+        if action == 1:  # BUY
+            if pos <= 0:
+                ep = self.latest_ask
+                if ep > 0:
+                    step_reward -= self.commission_rate + self.latest_spread * 0.5 / ep
+                    if pos == -1 and entry > 0:
+                        realized_pnl = (entry - ep) / entry
                         step_reward += realized_pnl
-                    
                     self.current_position = 1
-                    self.entry_price = execution_price
+                    self.entry_price = ep
                     trade_executed = True
                     self.prev_unrealized_pnl = 0.0
                     self.holding_time = 0
-                    self.trade_history.append(1)
+                    self._push_trade(1)
             else:
                 step_reward -= self.REDUNDANT_PENALTY
                 
-        elif action == 2:  # Request SELL
-            if self.current_position >= 0:
-                execution_price = self.latest_bid
-                if execution_price > 0:
-                    slippage_cost = self.latest_spread / 2.0 / execution_price
-                    step_reward -= (self.commission_rate + slippage_cost)
-                    
-                    if self.current_position == 1 and self.entry_price > 0:
-                        realized_pnl = (execution_price - self.entry_price) / self.entry_price
+        elif action == 2:  # SELL
+            if pos >= 0:
+                ep = self.latest_bid
+                if ep > 0:
+                    step_reward -= self.commission_rate + self.latest_spread * 0.5 / ep
+                    if pos == 1 and entry > 0:
+                        realized_pnl = (ep - entry) / entry
                         step_reward += realized_pnl
-                    
                     self.current_position = -1
-                    self.entry_price = execution_price
+                    self.entry_price = ep
                     trade_executed = True
                     self.prev_unrealized_pnl = 0.0
                     self.holding_time = 0
-                    self.trade_history.append(1)
+                    self._push_trade(1)
             else:
                 step_reward -= self.REDUNDANT_PENALTY
-        else:
-            # Action == 0 (HOLD)
-            self.trade_history.append(0)
         
-        # ----------------------------------------------------------
-        # 3. REWARD ENGINEERING — V4 SOFT PENALTIES ONLY
-        # ----------------------------------------------------------
+        # HOLD or after action: push trade=0 if no trade happened
+        if not trade_executed:
+            self._push_trade(0)
         
-        # Overtrading Penalty: Gentle discouragement of excessive trading
-        recent_trades = sum(self.trade_history)
-        if recent_trades > self.OVERTRADE_MAX:
-            excess = recent_trades - self.OVERTRADE_MAX
-            step_reward -= excess * self.OVERTRADE_PENALTY
+        # 3. OVERTRADING PENALTY (O(1) running sum)
+        rt = self._trade_running_sum
+        if rt > self.OVERTRADE_MAX:
+            step_reward -= (rt - self.OVERTRADE_MAX) * self.OVERTRADE_PENALTY
         
-        # ----------------------------------------------------------
-        # 4. UPDATE UNREALIZED PnL & STATE
-        # ----------------------------------------------------------
+        # 4. UPDATE STATE (in-place, zero allocation)
         unrealized_pnl = 0.0
         if self.current_position == 1 and self.entry_price > 0:
             unrealized_pnl = (self.latest_bid - self.entry_price) / self.entry_price
@@ -267,8 +272,7 @@ class OFITradingEnv(gym.Env):
         
         self.prev_unrealized_pnl = unrealized_pnl
         self.prev_spread = self.latest_spread
-        
-        self.state = self._build_state(unrealized_pnl)
+        self._write_state(unrealized_pnl)
         self.cumulative_reward += step_reward
         
         info = {
@@ -277,58 +281,31 @@ class OFITradingEnv(gym.Env):
             "position": self.current_position,
             "trade_executed": trade_executed,
             "reward": step_reward,
-            "total_trades": sum(self.trade_history),
+            "total_trades": self._trade_running_sum,
         }
         
-        # Termination conditions
-        terminated = False
-        truncated = False
-        if unrealized_pnl < cfg.STOP_LOSS_THRESHOLD:
-            terminated = True
-            logger.warning("Stop loss triggered! Episode terminated.")
-            
-        if self.max_steps > 0 and self.current_step >= self.max_steps:
-            truncated = True
+        terminated = unrealized_pnl < cfg.STOP_LOSS_THRESHOLD
+        truncated = self.max_steps > 0 and self.current_step >= self.max_steps
             
         return self.state, float(step_reward), terminated, truncated, info
-
-    def _load_tick_from_df(self):
-        """
-        Reads the current tick from pre-cached numpy arrays.
-        O(1) access — no pandas overhead.
-        """
-        idx = min(self.current_step, self._df_len - 1)
-        self.update_market_data(
-            ofi=self._df_ofi[idx],
-            bid=self._df_bid[idx],
-            ask=self._df_ask[idx]
-        )
 
     def update_market_data(self, ofi: float, bid: float, ask: float):
         """
         Injects real-time WebSocket data into the environment.
-        Updates OFI history, EMA, and recalculates PnL.
-        Also called internally by _load_tick_from_df() in DataFrame mode.
+        Used in live mode (when no DataFrame is provided).
         """
         self.latest_ofi = ofi
         self.latest_bid = bid
         self.latest_ask = ask
         self.latest_spread = ask - bid
+        self._push_ofi(ofi)
         
-        # Append to OFI history for lookback window
-        self.ofi_history.append(ofi)
-        
-        # Update EMA: EMA_t = alpha * OFI_t + (1-alpha) * EMA_{t-1}
-        self.ofi_ema = self.ema_alpha * ofi + (1 - self.ema_alpha) * self.ofi_ema
-        
-        # Recalculate unrealized PnL
         unrealized_pnl = 0.0
         if self.current_position == 1 and self.entry_price > 0:
             unrealized_pnl = (bid - self.entry_price) / self.entry_price
         elif self.current_position == -1 and self.entry_price > 0:
             unrealized_pnl = (self.entry_price - ask) / self.entry_price
-            
-        self.state = self._build_state(unrealized_pnl)
+        self._write_state(unrealized_pnl)
 
     def render(self):
         """Renders the environment to standard output."""
