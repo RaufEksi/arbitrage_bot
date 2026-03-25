@@ -71,6 +71,7 @@ TOTAL_TIMESTEPS_COLAB = 2_000_000
 EVAL_FREQ = 50_000
 EVAL_EPISODES = 1
 EVAL_MAX_STEPS = 5_000
+N_ENVS = 8  # Parallel environments for SubprocVecEnv
 TRAIN_TEST_SPLIT = 0.8
 
 # =============================================================
