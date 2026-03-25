@@ -60,6 +60,7 @@ from env import OFITradingEnv
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.callbacks import EvalCallback
+from stable_baselines3.common.monitor import Monitor
 
 MODELS_DIR = cfg.MODELS_DIR
 LOGS_DIR = cfg.LOGS_DIR
@@ -77,7 +78,7 @@ def make_train_env():
 
 def make_eval_env():
     eval_slice = test_df.iloc[:cfg.EVAL_MAX_STEPS].reset_index(drop=True)
-    return OFITradingEnv(df=eval_slice)
+    return Monitor(OFITradingEnv(df=eval_slice))
 
 env = DummyVecEnv([make_train_env])
 eval_env = DummyVecEnv([make_eval_env])

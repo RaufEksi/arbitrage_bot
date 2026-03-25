@@ -4,6 +4,7 @@ import pandas as pd
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.callbacks import EvalCallback
+from stable_baselines3.common.monitor import Monitor
 
 import config as cfg
 from env import OFITradingEnv
@@ -33,13 +34,13 @@ def train():
             return OFITradingEnv(df=train_df)
         def make_eval_env():
             eval_slice = test_df.iloc[:cfg.EVAL_MAX_STEPS].reset_index(drop=True)
-            return OFITradingEnv(df=eval_slice)
+            return Monitor(OFITradingEnv(df=eval_slice))
     else:
         logger.warning(f"Real data not found at {cfg.DATA_PATH}. Using synthetic mode.")
         def make_train_env():
             return OFITradingEnv()
         def make_eval_env():
-            return OFITradingEnv()
+            return Monitor(OFITradingEnv())
     
     # ------------------------------------------------------------------
     # ENVIRONMENT WRAPPING: DummyVecEnv -> VecNormalize
