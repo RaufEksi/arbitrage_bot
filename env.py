@@ -58,13 +58,24 @@ class OFITradingEnv(gym.Env):
         # When df is provided, the environment reads market data from the DataFrame
         # at each step. When df is None, it works in live/manual mode via update_market_data().
         self.df = df
+        self._df_ofi = None
+        self._df_bid = None
+        self._df_ask = None
+        self._df_len = 0
+        
         if self.df is not None:
             required_cols = {"bid_price", "ask_price", "ofi", "spread"}
             missing = required_cols - set(self.df.columns)
             if missing:
                 raise ValueError(f"DataFrame missing required columns: {missing}")
-            self.max_steps = len(self.df) - 1  # Auto-detect from data length
-            logger.info(f"DataFrame mode: {len(self.df):,} rows loaded, max_steps={self.max_steps}")
+            # Pre-cache as numpy arrays for O(1) access (eliminates iloc overhead)
+            self._df_ofi = self.df["ofi"].to_numpy(dtype=np.float64)
+            self._df_bid = self.df["bid_price"].to_numpy(dtype=np.float64)
+            self._df_ask = self.df["ask_price"].to_numpy(dtype=np.float64)
+            self._df_len = len(self.df)
+            self.max_steps = self._df_len - 1
+            self.df = None  # Free DataFrame memory
+            logger.info(f"DataFrame mode: {self._df_len:,} rows cached as numpy, max_steps={self.max_steps}")
         else:
             self.max_steps = max_steps
         
@@ -165,9 +176,8 @@ class OFITradingEnv(gym.Env):
         """
         Executes a single step with V2 reward engineering.
         """
-        # --- Load market data from DataFrame BEFORE incrementing step ---
-        # This ensures step 0 reads df.iloc[0], step 1 reads df.iloc[1], etc.
-        if self.df is not None:
+        # --- Load market data from numpy cache BEFORE incrementing step ---
+        if self._df_ofi is not None:
             self._load_tick_from_df()
         
         self.current_step += 1
@@ -284,18 +294,15 @@ class OFITradingEnv(gym.Env):
 
     def _load_tick_from_df(self):
         """
-        Reads the current tick's market data from the internal DataFrame.
-        Called automatically at the start of each step() when in DataFrame mode.
+        Reads the current tick from pre-cached numpy arrays.
+        O(1) access — no pandas overhead.
         """
-        idx = min(self.current_step, len(self.df) - 1)
-        row = self.df.iloc[idx]
-        
-        ofi = float(row["ofi"])
-        bid = float(row["bid_price"])
-        ask = float(row["ask_price"])
-        
-        # Delegate to existing update logic for consistency
-        self.update_market_data(ofi=ofi, bid=bid, ask=ask)
+        idx = min(self.current_step, self._df_len - 1)
+        self.update_market_data(
+            ofi=self._df_ofi[idx],
+            bid=self._df_bid[idx],
+            ask=self._df_ask[idx]
+        )
 
     def update_market_data(self, ofi: float, bid: float, ask: float):
         """
