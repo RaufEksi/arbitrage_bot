@@ -76,7 +76,8 @@ def make_train_env():
     return OFITradingEnv(df=train_df)
 
 def make_eval_env():
-    return OFITradingEnv(df=test_df)
+    eval_slice = test_df.iloc[:cfg.EVAL_MAX_STEPS].reset_index(drop=True)
+    return OFITradingEnv(df=eval_slice)
 
 env = DummyVecEnv([make_train_env])
 eval_env = DummyVecEnv([make_eval_env])
@@ -88,6 +89,7 @@ eval_callback = EvalCallback(
     best_model_save_path=MODELS_DIR,
     log_path=LOGS_DIR, 
     eval_freq=cfg.EVAL_FREQ,
+    n_eval_episodes=cfg.EVAL_EPISODES,
     deterministic=True, 
     render=False
 )
