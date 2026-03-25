@@ -68,7 +68,7 @@ CLIP_OBS = 10.0
 
 TOTAL_TIMESTEPS_LOCAL = 20_000
 TOTAL_TIMESTEPS_COLAB = 2_000_000
-EVAL_FREQ = 10_000
+EVAL_FREQ = 50_000
 TRAIN_TEST_SPLIT = 0.8
 
 # =============================================================
