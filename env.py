@@ -148,7 +148,7 @@ class OFITradingEnv(gym.Env):
         self.state[:] = 0.0
         self._inv_max_steps = 1.0 / max(self.max_steps, 1)
         
-        logger.info("Environment reset to flat state.")
+        logger.debug("Environment reset to flat state.")
         return self.state, {}
 
     def _write_state(self, unrealized_pnl: float):
