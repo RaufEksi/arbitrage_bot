@@ -51,7 +51,8 @@ REDUNDANT_PENALTY = 0.0003
 # State space
 OFI_LOOKBACK = 5
 EMA_SPAN = 20
-OBS_DIM = 12
+OBS_DIM = 14
+VOLATILITY_WINDOW = 100
 
 # =============================================================
 # RL HYPERPARAMETERS (PPO)

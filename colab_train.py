@@ -6,70 +6,71 @@
 # KULLANIM:
 # 1. Google Colab > Runtime > Change runtime type > GPU (A100)
 # 2. Bu dosyanin icerigini tek bir hucreye yapistirin
-# 3. Ilk upload: env.py, config.py, logger.py
-# 4. Ikinci upload: btcusdt_ofi_data.csv
-# 5. Egitim bittikten sonra best_model.zip + vec_normalize.pkl indirilir
+# 3. Sol panelden (dosya ikonu) env.py, config.py, logger.py yukleyin
+# 4. Sol panelden btcusdt_ofi_data.csv yukleyin
+# 5. Hucreyi calistirin
 # =============================================================
 
 # --- CELL 1: Kurulum ---
-import subprocess, sys
+import subprocess, sys, os
 subprocess.check_call([sys.executable, "-m", "pip", "install", "-q",
                        "stable-baselines3[extra]", "gymnasium", "numpy",
                        "pandas", "tensorboard"])
 
-# --- CELL 2: Proje dosyalarini yukle ---
-from google.colab import files
-import os
+# --- CELL 2: Dosya kontrolu ---
+# Sol panelden (klasor ikonu) dosyalari Colab'a surukle-birak ile yukleyin.
+# Dosyalar /content/ dizininde olmalidir.
+
+REQUIRED_SRC  = ["env.py", "config.py", "logger.py"]
+CSV_FILENAME  = "btcusdt_ofi_data.csv"
 
 print("="*60)
-print("  PROJE DOSYALARINI YUKLEYIN")
-print("  Lutfen su 3 dosyayi secin: env.py, config.py, logger.py")
-print("="*60 + "\n")
+print("  DOSYA KONTROLU")
+print("="*60)
 
-uploaded_src = files.upload()
-for f in ["env.py", "config.py", "logger.py"]:
-    if not os.path.exists(f):
-        raise FileNotFoundError(f"{f} yuklenmedi!")
-print("Kaynak dosyalar yuklendi.")
+missing = [f for f in REQUIRED_SRC if not os.path.exists(f)]
+if missing:
+    print(f"\n  EKSIK DOSYALAR: {missing}")
+    print("  Sol panelden (klasor ikonu) bu dosyalari yukleyin.")
+    print("  Sonra bu hucreyi tekrar calistirin.\n")
+    raise FileNotFoundError(f"Eksik: {missing}")
 
-# --- CELL 3: CSV yukle ---
+if not os.path.exists(CSV_FILENAME):
+    print(f"\n  EKSIK: {CSV_FILENAME}")
+    print("  Sol panelden CSV dosyasini yukleyin.")
+    print("  Sonra bu hucreyi tekrar calistirin.\n")
+    raise FileNotFoundError(f"Eksik: {CSV_FILENAME}")
+
+print("  env.py         ✓")
+print("  config.py      ✓")
+print("  logger.py      ✓")
+print(f"  {CSV_FILENAME} ✓")
+print("="*60)
+
+# --- CELL 3: Veri yukle ve kontrol et ---
 import pandas as pd
 
-print("\n" + "="*60)
-print("  GERCEK VERI YUKLEME")
-print("  Lutfen btcusdt_ofi_data.csv dosyanizi secin.")
-print("="*60 + "\n")
-
-uploaded_csv = files.upload()
-csv_filename = list(uploaded_csv.keys())[0]
-
-# Save with standard name so SubprocVecEnv workers can find it
-STANDARD_CSV = "btcusdt_ofi_data.csv"
-if csv_filename != STANDARD_CSV:
-    os.rename(csv_filename, STANDARD_CSV)
-    csv_filename = STANDARD_CSV
-
-full_df = pd.read_csv(csv_filename)
-print(f"Toplam satir: {len(full_df):,}")
+full_df = pd.read_csv(CSV_FILENAME)
+print(f"\nToplam satir: {len(full_df):,}")
 
 required_cols = {"bid_price", "ask_price", "ofi", "spread"}
-missing = required_cols - set(full_df.columns)
-if missing:
-    raise ValueError(f"Eksik kolonlar: {missing}")
+missing_cols = required_cols - set(full_df.columns)
+if missing_cols:
+    raise ValueError(f"CSV'de eksik kolonlar: {missing_cols}")
+print("Kolon kontrolu GECTI ✓")
 
-# --- CELL 4: config.py DATA_PATH override for Colab ---
-import config as cfg
-
-# Override DATA_PATH to point to uploaded CSV in Colab's working dir
-cfg.DATA_PATH = STANDARD_CSV
-
-# --- CELL 5: Paralel egitim ---
+# --- CELL 4: Config ve ortam ---
 import numpy as np
+import config as cfg
+from env import OFITradingEnv
+
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecNormalize
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
-from env import OFITradingEnv
+
+# Override DATA_PATH -> Colab working dir
+cfg.DATA_PATH = CSV_FILENAME
 
 MODELS_DIR = cfg.MODELS_DIR
 LOGS_DIR = cfg.LOGS_DIR
@@ -80,39 +81,43 @@ os.makedirs(LOGS_DIR, exist_ok=True)
 split_idx = int(len(full_df) * cfg.TRAIN_TEST_SPLIT)
 train_df = full_df.iloc[:split_idx].reset_index(drop=True)
 test_df = full_df.iloc[split_idx:].reset_index(drop=True)
-n_envs = cfg.N_ENVS
+
+n_envs = getattr(cfg, 'N_ENVS', 8)
+eval_max = getattr(cfg, 'EVAL_MAX_STEPS', 5000)
+eval_eps = getattr(cfg, 'EVAL_EPISODES', 1)
+eval_freq = getattr(cfg, 'EVAL_FREQ', 50000)
+
 print(f"Train: {len(train_df):,} | Test: {len(test_df):,} | Envs: {n_envs}")
 
-# -- Picklable factories: each worker loads CSV from disk --
-def _make_train_env(rank):
+# --- CELL 5: Paralel ortam ve egitim ---
+# DummyVecEnv with multiple envs (SubprocVecEnv crashes in Colab notebooks)
+# Numpy-optimized env.py ensures high FPS even without multiprocessing.
+
+def _make_train_env(train_data):
+    """Creates a train env from in-memory DataFrame."""
     def _init():
-        df = pd.read_csv(cfg.DATA_PATH)
-        si = int(len(df) * cfg.TRAIN_TEST_SPLIT)
-        return OFITradingEnv(df=df.iloc[:si].reset_index(drop=True))
+        return OFITradingEnv(df=train_data)
     return _init
 
-def _make_eval_env():
+def _make_eval_env(test_data, max_steps):
+    """Creates an eval env from in-memory DataFrame."""
     def _init():
-        df = pd.read_csv(cfg.DATA_PATH)
-        si = int(len(df) * cfg.TRAIN_TEST_SPLIT)
-        test = df.iloc[si:].reset_index(drop=True)
-        return Monitor(OFITradingEnv(df=test.iloc[:cfg.EVAL_MAX_STEPS].reset_index(drop=True)))
+        return Monitor(OFITradingEnv(df=test_data.iloc[:max_steps].reset_index(drop=True)))
     return _init
 
-# Parallel train envs, single eval env
-env = SubprocVecEnv([_make_train_env(i) for i in range(n_envs)])
-eval_env = DummyVecEnv([_make_eval_env()])
+env = DummyVecEnv([_make_train_env(train_df) for _ in range(n_envs)])
+eval_env = DummyVecEnv([_make_eval_env(test_df, eval_max)])
 
 env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=cfg.CLIP_OBS)
 eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, clip_obs=cfg.CLIP_OBS)
 
 eval_callback = EvalCallback(
-    eval_env, 
+    eval_env,
     best_model_save_path=MODELS_DIR,
-    log_path=LOGS_DIR, 
-    eval_freq=max(cfg.EVAL_FREQ // n_envs, 1),
-    n_eval_episodes=cfg.EVAL_EPISODES,
-    deterministic=True, 
+    log_path=LOGS_DIR,
+    eval_freq=max(eval_freq // n_envs, 1),
+    n_eval_episodes=eval_eps,
+    deterministic=True,
     render=False
 )
 
@@ -134,7 +139,12 @@ model = PPO(
     device="auto"
 )
 
-print(f"\nV4 Egitim: {TOTAL_TIMESTEPS:,} timestep | {n_envs} paralel ortam | GPU: {model.device}")
+print(f"\nV4 Egitim Basliyor")
+print(f"  Timestep  : {TOTAL_TIMESTEPS:,}")
+print(f"  Envs      : {n_envs} paralel")
+print(f"  GPU       : {model.device}")
+print(f"  Eval freq : her {eval_freq:,} step\n")
+
 model.learn(
     total_timesteps=TOTAL_TIMESTEPS,
     callback=eval_callback,
@@ -146,9 +156,11 @@ vec_norm_path = os.path.join(MODELS_DIR, "vec_normalize.pkl")
 env.save(vec_norm_path)
 env.close()
 eval_env.close()
-print("V4 Egitim tamamlandi!")
+print("\nV4 Egitim tamamlandi!")
 
 # --- CELL 6: Indir ---
+from google.colab import files
+
 best_path = os.path.join(MODELS_DIR, "best_model.zip")
 final_path = os.path.join(MODELS_DIR, "final_trading_model.zip")
 

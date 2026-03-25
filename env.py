@@ -12,9 +12,9 @@ logger = get_logger("OFITradingEnv")
 
 class OFITradingEnv(gym.Env):
     """
-    V4 HFT Trading Environment — Performance Optimized.
+    V4 HFT Trading Environment — Performance Optimized + Feature Engineering.
     
-    Observation Space (12-dim Continuous):
+    Observation Space (14-dim Continuous):
         [0-4]:  OFI lookback window (last 5 ticks)
         [5]:    OFI Exponential Moving Average (EMA-20)
         [6]:    Current Spread
@@ -23,6 +23,8 @@ class OFITradingEnv(gym.Env):
         [9]:    Unrealized PnL
         [10]:   Holding time (normalized by max_steps)
         [11]:   Step progress (current_step / max_steps)
+        [12]:   OBI — Order Book Imbalance (bid_qty-ask_qty)/(bid_qty+ask_qty)
+        [13]:   Volatility — Rolling std of mid_price
         
     Action Space (Discrete):
         0: Hold (Do nothing)
@@ -68,9 +70,35 @@ class OFITradingEnv(gym.Env):
             self._df_ofi = df["ofi"].to_numpy(dtype=np.float64)
             self._df_bid = df["bid_price"].to_numpy(dtype=np.float64)
             self._df_ask = df["ask_price"].to_numpy(dtype=np.float64)
+            
+            # --- Feature Engineering: OBI and Volatility ---
+            if "bid_qty" in df.columns and "ask_qty" in df.columns:
+                bid_qty = df["bid_qty"].to_numpy(dtype=np.float64)
+                ask_qty = df["ask_qty"].to_numpy(dtype=np.float64)
+                total_qty = bid_qty + ask_qty
+                self._df_obi = np.where(total_qty > 0, (bid_qty - ask_qty) / total_qty, 0.0)
+            else:
+                self._df_obi = np.zeros(len(df), dtype=np.float64)
+                logger.warning("bid_qty/ask_qty not found — OBI set to 0.")
+            
+            mid_price = (df["bid_price"].to_numpy(dtype=np.float64) + 
+                         df["ask_price"].to_numpy(dtype=np.float64)) / 2.0
+            vol_window = getattr(cfg, 'VOLATILITY_WINDOW', 100)
+            # Rolling std via cumsum trick (fast, no pandas)
+            self._df_vol = np.zeros(len(df), dtype=np.float64)
+            if len(df) > vol_window:
+                cumsum = np.cumsum(mid_price)
+                cumsum2 = np.cumsum(mid_price ** 2)
+                n = vol_window
+                mean = (cumsum[n:] - cumsum[:-n]) / n
+                mean2 = (cumsum2[n:] - cumsum2[:-n]) / n
+                var = mean2 - mean ** 2
+                var = np.maximum(var, 0.0)  # numerical safety
+                self._df_vol[n:] = np.sqrt(var)
+            
             self._df_len = len(df)
             self.max_steps = self._df_len - 1
-            logger.info(f"DataFrame mode: {self._df_len:,} rows cached as numpy, max_steps={self.max_steps}")
+            logger.info(f"DataFrame mode: {self._df_len:,} rows cached (OFI+OBI+Vol), max_steps={self.max_steps}")
         else:
             self.max_steps = max_steps
         
@@ -115,6 +143,8 @@ class OFITradingEnv(gym.Env):
         self.latest_bid: float = 0.0
         self.latest_ask: float = 0.0
         self.latest_spread: float = 0.0
+        self.latest_obi: float = 0.0
+        self.latest_vol: float = 0.0
         
         # Cache for step()
         self._inv_max_steps = 1.0 / max(self.max_steps, 1)
@@ -144,6 +174,8 @@ class OFITradingEnv(gym.Env):
         self.latest_spread = 0.0
         self.latest_bid = 0.0
         self.latest_ask = 0.0
+        self.latest_obi = 0.0
+        self.latest_vol = 0.0
         
         self.state[:] = 0.0
         self._inv_max_steps = 1.0 / max(self.max_steps, 1)
@@ -169,6 +201,8 @@ class OFITradingEnv(gym.Env):
         s[9] = unrealized_pnl
         s[10] = min(self.holding_time * self._inv_max_steps, 1.0)
         s[11] = min(self.current_step * self._inv_max_steps, 1.0)
+        s[12] = self.latest_obi
+        s[13] = self.latest_vol
 
     def _push_ofi(self, ofi: float):
         """Appends OFI to circular buffer and updates EMA. O(1)."""
@@ -198,6 +232,8 @@ class OFITradingEnv(gym.Env):
             self.latest_bid = bid
             self.latest_ask = ask
             self.latest_spread = ask - bid
+            self.latest_obi = self._df_obi[idx]
+            self.latest_vol = self._df_vol[idx]
             self._push_ofi(ofi)
         
         self.current_step += 1
