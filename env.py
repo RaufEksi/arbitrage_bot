@@ -12,9 +12,9 @@ logger = get_logger("OFITradingEnv")
 
 class OFITradingEnv(gym.Env):
     """
-    V4 HFT Trading Environment — Performance Optimized + Feature Engineering.
+    V6 HFT Trading Environment — Noise Filtering & Z-Scores.
     
-    Observation Space (14-dim Continuous):
+    Observation Space (16-dim Continuous):
         [0-4]:  OFI lookback window (last 5 ticks)
         [5]:    OFI Exponential Moving Average (EMA-20)
         [6]:    Current Spread
@@ -25,6 +25,8 @@ class OFITradingEnv(gym.Env):
         [11]:   Step progress (current_step / max_steps)
         [12]:   OBI — Order Book Imbalance (bid_qty-ask_qty)/(bid_qty+ask_qty)
         [13]:   Volatility — Rolling std of mid_price
+        [14]:   OFI Z-Score — Rolling (EMA-mean)/std
+        [15]:   OBI Z-Score — Rolling (EMA-mean)/std
         
     Action Space (Discrete):
         0: Hold (Do nothing)
@@ -96,9 +98,26 @@ class OFITradingEnv(gym.Env):
                 var = np.maximum(var, 0.0)  # numerical safety
                 self._df_vol[n:] = np.sqrt(var)
             
+            # --- V6: EMA and Z-Score Calculation ---
+            # Fast EMA via pandas
+            ofi_s = pd.Series(self._df_ofi)
+            obi_s = pd.Series(self._df_obi)
+            ofi_ema = ofi_s.ewm(span=20, adjust=False).mean()
+            obi_ema = obi_s.ewm(span=20, adjust=False).mean()
+            
+            # Rolling Z-score
+            z_window = 100
+            ofi_rolling_mean = ofi_ema.rolling(window=z_window, min_periods=1).mean()
+            ofi_rolling_std = ofi_ema.rolling(window=z_window, min_periods=1).std().replace(0, 1e-8)
+            obi_rolling_mean = obi_ema.rolling(window=z_window, min_periods=1).mean()
+            obi_rolling_std = obi_ema.rolling(window=z_window, min_periods=1).std().replace(0, 1e-8)
+            
+            self._df_ofi_z = ((ofi_ema - ofi_rolling_mean) / ofi_rolling_std).fillna(0.0).to_numpy(dtype=np.float64)
+            self._df_obi_z = ((obi_ema - obi_rolling_mean) / obi_rolling_std).fillna(0.0).to_numpy(dtype=np.float64)
+            
             self._df_len = len(df)
             self.max_steps = self._df_len - 1
-            logger.info(f"DataFrame mode: {self._df_len:,} rows cached (OFI+OBI+Vol), max_steps={self.max_steps}")
+            logger.info(f"DataFrame mode: {self._df_len:,} rows cached (OFI+OBI+Vol+ZScores), max_steps={self.max_steps}")
         else:
             self.max_steps = max_steps
         
@@ -145,6 +164,8 @@ class OFITradingEnv(gym.Env):
         self.latest_spread: float = 0.0
         self.latest_obi: float = 0.0
         self.latest_vol: float = 0.0
+        self.latest_ofi_z: float = 0.0
+        self.latest_obi_z: float = 0.0
         
         # Cache for step()
         self._inv_max_steps = 1.0 / max(self.max_steps, 1)
@@ -176,6 +197,8 @@ class OFITradingEnv(gym.Env):
         self.latest_ask = 0.0
         self.latest_obi = 0.0
         self.latest_vol = 0.0
+        self.latest_ofi_z = 0.0
+        self.latest_obi_z = 0.0
         
         self.state[:] = 0.0
         self._inv_max_steps = 1.0 / max(self.max_steps, 1)
@@ -203,6 +226,8 @@ class OFITradingEnv(gym.Env):
         s[11] = min(self.current_step * self._inv_max_steps, 1.0)
         s[12] = self.latest_obi
         s[13] = self.latest_vol
+        s[14] = self.latest_ofi_z
+        s[15] = self.latest_obi_z
 
     def _push_ofi(self, ofi: float):
         """Appends OFI to circular buffer and updates EMA. O(1)."""
@@ -234,6 +259,8 @@ class OFITradingEnv(gym.Env):
             self.latest_spread = ask - bid
             self.latest_obi = self._df_obi[idx]
             self.latest_vol = self._df_vol[idx]
+            self.latest_ofi_z = self._df_ofi_z[idx]
+            self.latest_obi_z = self._df_obi_z[idx]
             self._push_ofi(ofi)
         
         self.current_step += 1
@@ -256,6 +283,12 @@ class OFITradingEnv(gym.Env):
         step_reward = current_unrealized_pnl - self.prev_unrealized_pnl
 
         # 2. ACTION LOGIC
+        if action == 1 or action == 2:
+            # Noise Trading Penalty (Deadzone)
+            if abs(self.latest_ofi_z) < 1.0 and abs(self.latest_obi_z) < 1.0:
+                deadzone_penalty = getattr(cfg, 'NOISE_TRADING_PENALTY', 0.0005)
+                step_reward -= deadzone_penalty
+
         if action == 1:  # BUY
             if pos <= 0:
                 ep = self.latest_ask

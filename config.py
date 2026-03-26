@@ -38,20 +38,21 @@ TPS_LOG_INTERVAL_SEC = 5
 # =============================================================
 # TRADING ENVIRONMENT (OFITradingEnv)
 # =============================================================
-COMMISSION_RATE = 0.0004
+COMMISSION_RATE = 0.000
 STOP_LOSS_THRESHOLD = -0.05
 DEFAULT_MAX_STEPS = 10_000
 
 # Reward tuning
 OVERTRADE_WINDOW = 50
 OVERTRADE_MAX = 20
-OVERTRADE_PENALTY = 0.0003
-REDUNDANT_PENALTY = 0.0003
+OVERTRADE_PENALTY = 0.00103
+REDUNDANT_PENALTY = 0.0008
+NOISE_TRADING_PENALTY = 0.0005  # V6: Penalty for trading in Z-score deadzone
 
 # State space
 OFI_LOOKBACK = 5
 EMA_SPAN = 20
-OBS_DIM = 14
+OBS_DIM = 16
 VOLATILITY_WINDOW = 100
 
 # =============================================================
