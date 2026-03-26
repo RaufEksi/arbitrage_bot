@@ -17,12 +17,18 @@ DATA_CSV_FILENAME = "btcusdt_ofi_data.csv"
 DATA_PATH = f"{DATA_DIR}{DATA_CSV_FILENAME}"
 
 # =============================================================
-# BINANCE API
+# BINANCE API & TESTNET
 # =============================================================
 SYMBOL = "btcusdt"
 BINANCE_REST_URL = "https://api.binance.com/api/v3/depth"
 BINANCE_WS_DEPTH_URL = "wss://stream.binance.com:9443/ws/{}@depth@100ms"
 BINANCE_WS_BOOKTICKER_URL = "wss://stream.binance.com:9443/ws/{}@bookTicker"
+
+TESTNET_API_KEY = "YOUR_TESTNET_API_KEY"
+TESTNET_API_SECRET = "YOUR_TESTNET_API_SECRET"
+TESTNET_REST_URL = "https://testnet.binancefuture.com"
+TESTNET_WSS_URL = "wss://stream.binancefuture.com/ws/{}@bookTicker"
+
 SNAPSHOT_LIMIT = 1000
 DISPLAY_LEVELS = 5
 

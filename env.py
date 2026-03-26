@@ -12,7 +12,7 @@ logger = get_logger("OFITradingEnv")
 
 class OFITradingEnv(gym.Env):
     """
-    V6 HFT Trading Environment — Noise Filtering & Z-Scores.
+    V7 HFT Trading Environment — Limit Maker Pivot & PnL Isolation.
     
     Observation Space (16-dim Continuous):
         [0-4]:  OFI lookback window (last 5 ticks)
@@ -115,7 +115,18 @@ class OFITradingEnv(gym.Env):
             self._df_ofi_z = ((ofi_ema - ofi_rolling_mean) / ofi_rolling_std).fillna(0.0).to_numpy(dtype=np.float64)
             self._df_obi_z = ((obi_ema - obi_rolling_mean) / obi_rolling_std).fillna(0.0).to_numpy(dtype=np.float64)
             
-            self._df_len = len(df)
+            # --- V7: Slice warmup period (first 100 rows) ---
+            warmup = 100
+            if len(df) > warmup:
+                self._df_ofi = self._df_ofi[warmup:]
+                self._df_bid = self._df_bid[warmup:]
+                self._df_ask = self._df_ask[warmup:]
+                self._df_obi = self._df_obi[warmup:]
+                self._df_vol = self._df_vol[warmup:]
+                self._df_ofi_z = self._df_ofi_z[warmup:]
+                self._df_obi_z = self._df_obi_z[warmup:]
+            
+            self._df_len = len(self._df_ofi)
             self.max_steps = self._df_len - 1
             logger.info(f"DataFrame mode: {self._df_len:,} rows cached (OFI+OBI+Vol+ZScores), max_steps={self.max_steps}")
         else:
@@ -157,6 +168,11 @@ class OFITradingEnv(gym.Env):
         self.holding_time: int = 0
         self.prev_spread: float = 0.0
         
+        # V7 Maker Limit Orders & Financial PnL
+        self.pending_buy_price: float = 0.0
+        self.pending_sell_price: float = 0.0
+        self.financial_pnl: float = 0.0
+        
         # Latest market data
         self.latest_ofi: float = 0.0
         self.latest_bid: float = 0.0
@@ -182,6 +198,10 @@ class OFITradingEnv(gym.Env):
         self.holding_time = 0
         self.prev_spread = 0.0
         self.ofi_ema = 0.0
+        
+        self.pending_buy_price = 0.0
+        self.pending_sell_price = 0.0
+        self.financial_pnl = 0.0
         
         self._ofi_buf[:] = 0.0
         self._ofi_ptr = 0
@@ -270,58 +290,71 @@ class OFITradingEnv(gym.Env):
         trade_executed = False
         realized_pnl = 0.0
         
+        # ========================================================
+        # V7 MAKER SIMULATION: Check Pending Limit Fills
+        # ========================================================
+        if self.pending_buy_price > 0 and self.latest_ask <= self.pending_buy_price:
+            # BUY ORDER FILLED
+            if self.current_position == -1 and self.entry_price > 0:
+                realized_pnl = (self.entry_price - self.pending_buy_price) / self.entry_price
+                self.financial_pnl += realized_pnl
+                step_reward += realized_pnl
+            self.current_position = 1
+            self.entry_price = self.pending_buy_price
+            self.pending_buy_price = 0.0
+            trade_executed = True
+            self.prev_unrealized_pnl = 0.0
+            self.holding_time = 0
+            self._push_trade(1)
+
+        elif self.pending_sell_price > 0 and self.latest_bid >= self.pending_sell_price:
+            # SELL ORDER FILLED
+            if self.current_position == 1 and self.entry_price > 0:
+                realized_pnl = (self.pending_sell_price - self.entry_price) / self.entry_price
+                self.financial_pnl += realized_pnl
+                step_reward += realized_pnl
+            self.current_position = -1
+            self.entry_price = self.pending_sell_price
+            self.pending_sell_price = 0.0
+            trade_executed = True
+            self.prev_unrealized_pnl = 0.0
+            self.holding_time = 0
+            self._push_trade(1)
+        
         # 1. DIFFERENTIAL HOLDING REWARD (ΔPnL)
-        entry = self.entry_price
-        pos = self.current_position
-        
         current_unrealized_pnl = 0.0
-        if pos == 1 and entry > 0:
-            current_unrealized_pnl = (self.latest_bid - entry) / entry
-        elif pos == -1 and entry > 0:
-            current_unrealized_pnl = (entry - self.latest_ask) / entry
+        if self.current_position == 1 and self.entry_price > 0:
+            current_unrealized_pnl = (self.latest_bid - self.entry_price) / self.entry_price
+        elif self.current_position == -1 and self.entry_price > 0:
+            current_unrealized_pnl = (self.entry_price - self.latest_ask) / self.entry_price
         
-        step_reward = current_unrealized_pnl - self.prev_unrealized_pnl
+        if not trade_executed:
+            step_reward += current_unrealized_pnl - self.prev_unrealized_pnl
+        self.prev_unrealized_pnl = current_unrealized_pnl
 
-        # 2. ACTION LOGIC
+        # 2. ACTION LOGIC (Setting Limit Orders)
         if action == 1 or action == 2:
-            # Noise Trading Penalty (Deadzone)
+            # Noise Trading Penalty (Deadzone) doesn't affect true financial PnL
             if abs(self.latest_ofi_z) < 1.0 and abs(self.latest_obi_z) < 1.0:
-                deadzone_penalty = getattr(cfg, 'NOISE_TRADING_PENALTY', 0.0005)
-                step_reward -= deadzone_penalty
+                step_reward -= getattr(cfg, 'NOISE_TRADING_PENALTY', 0.0005)
 
-        if action == 1:  # BUY
-            if pos <= 0:
-                ep = self.latest_ask
-                if ep > 0:
-                    step_reward -= self.commission_rate + self.latest_spread * 0.5 / ep
-                    if pos == -1 and entry > 0:
-                        realized_pnl = (entry - ep) / entry
-                        step_reward += realized_pnl
-                    self.current_position = 1
-                    self.entry_price = ep
-                    trade_executed = True
-                    self.prev_unrealized_pnl = 0.0
-                    self.holding_time = 0
-                    self._push_trade(1)
+        if action == 1:  # BUY ACTION -> Set Bid
+            if self.current_position <= 0:
+                self.pending_buy_price = self.latest_bid
+                self.pending_sell_price = 0.0 # Cancel opposite
             else:
                 step_reward -= self.REDUNDANT_PENALTY
                 
-        elif action == 2:  # SELL
-            if pos >= 0:
-                ep = self.latest_bid
-                if ep > 0:
-                    step_reward -= self.commission_rate + self.latest_spread * 0.5 / ep
-                    if pos == 1 and entry > 0:
-                        realized_pnl = (ep - entry) / entry
-                        step_reward += realized_pnl
-                    self.current_position = -1
-                    self.entry_price = ep
-                    trade_executed = True
-                    self.prev_unrealized_pnl = 0.0
-                    self.holding_time = 0
-                    self._push_trade(1)
+        elif action == 2:  # SELL ACTION -> Set Ask
+            if self.current_position >= 0:
+                self.pending_sell_price = self.latest_ask
+                self.pending_buy_price = 0.0 # Cancel opposite
             else:
                 step_reward -= self.REDUNDANT_PENALTY
+        
+        elif action == 0: # HOLD -> Cancel pending orders (Pure HFT behavior)
+            self.pending_buy_price = 0.0
+            self.pending_sell_price = 0.0
         
         # HOLD or after action: push trade=0 if no trade happened
         if not trade_executed:
@@ -344,12 +377,20 @@ class OFITradingEnv(gym.Env):
         self._write_state(unrealized_pnl)
         self.cumulative_reward += step_reward
         
+        # V7 Financial PnL
+        current_financial_pnl = self.financial_pnl
+        if self.current_position == 1 and self.entry_price > 0:
+            current_financial_pnl += (self.latest_bid - self.entry_price) / self.entry_price
+        elif self.current_position == -1 and self.entry_price > 0:
+            current_financial_pnl += (self.entry_price - self.latest_ask) / self.entry_price
+
         info = {
-            "pnl": unrealized_pnl,
-            "realized_pnl": realized_pnl,
-            "position": self.current_position,
+            "pnl": float(current_financial_pnl), # Expose TRUE financial PnL, not RL reward
+            "financial_pnl": float(current_financial_pnl),
+            "realized_pnl": float(realized_pnl),
+            "position": int(self.current_position),
             "trade_executed": trade_executed,
-            "reward": step_reward,
+            "reward": float(step_reward),
             "total_trades": self._trade_running_sum,
         }
         
