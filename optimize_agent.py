@@ -211,8 +211,8 @@ def main():
             print(f"  {key:<20}: {value}")
     print("=" * 60)
     
-    # Save best params to config suggestion
-    print("\nconfig.py icin onerilen guncellemeler:")
+    # Print suggested config.py updates
+    print("\nSuggested config.py updates:")
     print("-" * 40)
     param_map = {
         "learning_rate": "LEARNING_RATE",

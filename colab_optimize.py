@@ -1,55 +1,55 @@
 # =============================================================
 # HFT OFI Bot -- Optuna Hyperparameter Optimization (Colab)
 # =============================================================
-# KULLANIM:
+# USAGE:
 # 1. Google Colab > Runtime > Change runtime type > GPU
-# 2. Bu dosyanin icerigini tek bir hucreye yapistirin
-# 3. Ilk upload: env.py, config.py, logger.py
-# 4. Ikinci upload: btcusdt_ofi_data.csv
-# 5. Optimizasyon bittikten sonra en iyi parametreler yazdirilir
-# 6. Bu parametreleri config.py'a gecirin, sonra colab_train.py calistirin
+# 2. Paste the contents of this file into a single cell
+# 3. First upload: env.py, config.py, logger.py
+# 4. Second upload: btcusdt_ofi_data.csv
+# 5. After optimization finishes, best parameters are printed
+# 6. Copy those parameters into config.py, then run colab_train.py
 # =============================================================
 
-# --- CELL 1: Kurulum ---
+# --- CELL 1: Install dependencies ---
 import subprocess, sys
 subprocess.check_call([sys.executable, "-m", "pip", "install", "-q",
                        "stable-baselines3[extra]", "gymnasium", "numpy",
                        "pandas", "optuna", "tensorboard"])
 
-# --- CELL 2: Proje dosyalarini yukle ---
+# --- CELL 2: Upload project files ---
 from google.colab import files
 import os
 
 print("="*60)
-print("  PROJE DOSYALARINI YUKLEYIN")
-print("  Lutfen su 3 dosyayi secin: env.py, config.py, logger.py")
+print("  UPLOAD PROJECT FILES")
+print("  Please select: env.py, config.py, logger.py")
 print("="*60 + "\n")
 
 uploaded_src = files.upload()
 for f in ["env.py", "config.py", "logger.py"]:
     if not os.path.exists(f):
-        raise FileNotFoundError(f"{f} yuklenmedi!")
-print("Kaynak dosyalar yuklendi.")
+        raise FileNotFoundError(f"{f} was not uploaded!")
+print("Source files uploaded successfully.")
 
-# --- CELL 3: CSV yukle ---
+# --- CELL 3: Upload CSV data ---
 import pandas as pd
 
 print("\n" + "="*60)
-print("  GERCEK VERI YUKLEME")
-print("  Lutfen btcusdt_ofi_data.csv dosyanizi secin.")
+print("  UPLOAD MARKET DATA")
+print("  Please select btcusdt_ofi_data.csv")
 print("="*60 + "\n")
 
 uploaded_csv = files.upload()
 csv_filename = list(uploaded_csv.keys())[0]
 full_df = pd.read_csv(csv_filename)
-print(f"Toplam satir: {len(full_df):,}")
+print(f"Total rows: {len(full_df):,}")
 
 required_cols = {"bid_price", "ask_price", "ofi", "spread"}
 missing = required_cols - set(full_df.columns)
 if missing:
-    raise ValueError(f"Eksik kolonlar: {missing}")
+    raise ValueError(f"Missing columns: {missing}")
 
-# --- CELL 4: Veri bolumu (70/10/20) ---
+# --- CELL 4: Data split (70/10/20) ---
 n = len(full_df)
 train_end = int(n * 0.7)
 val_end = int(n * 0.9)
@@ -59,7 +59,7 @@ val_df = full_df.iloc[train_end:val_end].reset_index(drop=True)
 test_df = full_df.iloc[val_end:].reset_index(drop=True)
 print(f"Train: {len(train_df):,} | Val: {len(val_df):,} | Test: {len(test_df):,}")
 
-# --- CELL 5: Optuna Optimizasyonu ---
+# --- CELL 5: Optuna Optimization ---
 import numpy as np
 import optuna
 import config as cfg
@@ -70,12 +70,12 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.monitor import Monitor
 
-# -- Ayarlar --
+# -- Settings --
 N_TRIALS = 30
 TIMESTEPS_PER_TRIAL = 50_000
 
 def objective(trial):
-    # Hiperparametre uzayi
+    # Hyperparameter search space
     lr = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
     n_steps = trial.suggest_categorical("n_steps", [1024, 2048, 4096, 8192])
     batch_size = trial.suggest_categorical("batch_size", [64, 128, 256, 512])
@@ -85,14 +85,14 @@ def objective(trial):
     gae_lambda = trial.suggest_float("gae_lambda", 0.8, 0.99)
     n_epochs = trial.suggest_int("n_epochs", 3, 15)
 
-    # batch_size n_steps'i tam bolmeli
+    # batch_size must evenly divide n_steps
     if n_steps % batch_size != 0:
         for bs in [512, 256, 128, 64, 32]:
             if n_steps % bs == 0:
                 batch_size = bs
                 break
 
-    # Ortam
+    # Environment setup
     train_env = DummyVecEnv([lambda: Monitor(OFITradingEnv(df=train_df))])
     val_env = DummyVecEnv([lambda: Monitor(OFITradingEnv(df=val_df))])
     train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True, clip_obs=cfg.CLIP_OBS)
@@ -108,7 +108,7 @@ def objective(trial):
         )
         model.learn(total_timesteps=TIMESTEPS_PER_TRIAL)
 
-        # Validation
+        # Sync normalization stats for validation
         val_env.obs_rms = train_env.obs_rms
         val_env.ret_rms = train_env.ret_rms
         val_env.training = False
@@ -117,7 +117,7 @@ def objective(trial):
         mean_reward, std_reward = evaluate_policy(model, val_env, n_eval_episodes=5, deterministic=True)
 
     except Exception as e:
-        print(f"Trial {trial.number} basarisiz: {e}")
+        print(f"Trial {trial.number} failed: {e}")
         return float("-inf")
     finally:
         train_env.close()
@@ -126,17 +126,17 @@ def objective(trial):
     print(f"Trial {trial.number}: mean_reward={mean_reward:.5f} (+/- {std_reward:.5f})")
     return mean_reward
 
-# Calistir
+# Run optimization
 study = optuna.create_study(direction="maximize", study_name="PPO_OFI_HFT")
 study.optimize(objective, n_trials=N_TRIALS, show_progress_bar=True)
 
-# --- CELL 6: Sonuclar ---
+# --- CELL 6: Results ---
 print("\n" + "="*60)
-print("OPTIMIZASYON TAMAMLANDI")
+print("OPTIMIZATION COMPLETE")
 print("="*60)
-print(f"\nEn Iyi Trial    : #{study.best_trial.number}")
-print(f"En Iyi Reward   : {study.best_value:.6f}")
-print(f"\nEn Iyi Hiperparametreler:")
+print(f"\nBest Trial    : #{study.best_trial.number}")
+print(f"Best Reward   : {study.best_value:.6f}")
+print(f"\nBest Hyperparameters:")
 print("-"*40)
 for key, value in study.best_params.items():
     if isinstance(value, float):
@@ -145,7 +145,7 @@ for key, value in study.best_params.items():
         print(f"  {key:<20}: {value}")
 
 print("\n" + "="*60)
-print("config.py ICIN KOPYALA-YAPISTIR:")
+print("COPY-PASTE FOR config.py:")
 print("="*60)
 param_map = {
     "learning_rate": "LEARNING_RATE",
@@ -162,8 +162,8 @@ for optuna_key, config_key in param_map.items():
         val = study.best_params[optuna_key]
         print(f"{config_key} = {val}")
 
-# Sonuclari CSV olarak indir
+# Download results as CSV
 results_df = study.trials_dataframe()
 results_df.to_csv("optuna_results.csv", index=False)
 files.download("optuna_results.csv")
-print("\noptuna_results.csv indirildi!")
+print("\nDownloaded optuna_results.csv")

@@ -1,45 +1,45 @@
 # =============================================================
 # HFT OFI Trading Bot -- Google Colab Training Script (V4)
 # =============================================================
-# SubprocVecEnv ile paralel CPU + GPU egitimi
+# Parallel CPU training with DummyVecEnv + optional GPU
 #
-# KULLANIM:
+# USAGE:
 # 1. Google Colab > Runtime > Change runtime type > GPU (A100)
-# 2. Bu dosyanin icerigini tek bir hucreye yapistirin
-# 3. Sol panelden (dosya ikonu) env.py, config.py, logger.py yukleyin
-# 4. Sol panelden btcusdt_ofi_data.csv yukleyin
-# 5. Hucreyi calistirin
+# 2. Paste the contents of this file into a single cell
+# 3. Upload env.py, config.py, logger.py from the sidebar (file icon)
+# 4. Upload btcusdt_ofi_data.csv from the sidebar
+# 5. Run the cell
 # =============================================================
 
-# --- CELL 1: Kurulum ---
+# --- CELL 1: Install dependencies ---
 import subprocess, sys, os
 subprocess.check_call([sys.executable, "-m", "pip", "install", "-q",
                        "stable-baselines3[extra]", "gymnasium", "numpy",
                        "pandas", "tensorboard"])
 
-# --- CELL 2: Dosya kontrolu ---
-# Sol panelden (klasor ikonu) dosyalari Colab'a surukle-birak ile yukleyin.
-# Dosyalar /content/ dizininde olmalidir.
+# --- CELL 2: Verify required files ---
+# Upload files to Colab via the sidebar (folder icon) using drag-and-drop.
+# Files should appear in the /content/ directory.
 
 REQUIRED_SRC  = ["env.py", "config.py", "logger.py"]
 CSV_FILENAME  = "btcusdt_ofi_data.csv"
 
 print("="*60)
-print("  DOSYA KONTROLU")
+print("  FILE VERIFICATION")
 print("="*60)
 
 missing = [f for f in REQUIRED_SRC if not os.path.exists(f)]
 if missing:
-    print(f"\n  EKSIK DOSYALAR: {missing}")
-    print("  Sol panelden (klasor ikonu) bu dosyalari yukleyin.")
-    print("  Sonra bu hucreyi tekrar calistirin.\n")
-    raise FileNotFoundError(f"Eksik: {missing}")
+    print(f"\n  MISSING FILES: {missing}")
+    print("  Upload them via the sidebar (folder icon).")
+    print("  Then re-run this cell.\n")
+    raise FileNotFoundError(f"Missing: {missing}")
 
 if not os.path.exists(CSV_FILENAME):
-    print(f"\n  EKSIK: {CSV_FILENAME}")
-    print("  Sol panelden CSV dosyasini yukleyin.")
-    print("  Sonra bu hucreyi tekrar calistirin.\n")
-    raise FileNotFoundError(f"Eksik: {CSV_FILENAME}")
+    print(f"\n  MISSING: {CSV_FILENAME}")
+    print("  Upload the CSV file via the sidebar.")
+    print("  Then re-run this cell.\n")
+    raise FileNotFoundError(f"Missing: {CSV_FILENAME}")
 
 print("  env.py         ✓")
 print("  config.py      ✓")
@@ -47,19 +47,19 @@ print("  logger.py      ✓")
 print(f"  {CSV_FILENAME} ✓")
 print("="*60)
 
-# --- CELL 3: Veri yukle ve kontrol et ---
+# --- CELL 3: Load and validate data ---
 import pandas as pd
 
 full_df = pd.read_csv(CSV_FILENAME)
-print(f"\nToplam satir: {len(full_df):,}")
+print(f"\nTotal rows: {len(full_df):,}")
 
 required_cols = {"bid_price", "ask_price", "ofi", "spread"}
 missing_cols = required_cols - set(full_df.columns)
 if missing_cols:
-    raise ValueError(f"CSV'de eksik kolonlar: {missing_cols}")
-print("Kolon kontrolu GECTI ✓")
+    raise ValueError(f"CSV missing columns: {missing_cols}")
+print("Column validation PASSED ✓")
 
-# --- CELL 4: Config ve ortam ---
+# --- CELL 4: Setup config and environments ---
 import numpy as np
 import config as cfg
 from env import OFITradingEnv
@@ -69,7 +69,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
 
-# Override DATA_PATH -> Colab working dir
+# Override DATA_PATH for Colab working directory
 cfg.DATA_PATH = CSV_FILENAME
 
 MODELS_DIR = cfg.MODELS_DIR
@@ -89,18 +89,18 @@ eval_freq = getattr(cfg, 'EVAL_FREQ', 50000)
 
 print(f"Train: {len(train_df):,} | Test: {len(test_df):,} | Envs: {n_envs}")
 
-# --- CELL 5: Paralel ortam ve egitim ---
-# DummyVecEnv with multiple envs (SubprocVecEnv crashes in Colab notebooks)
+# --- CELL 5: Parallel environments and training ---
+# DummyVecEnv with multiple envs (SubprocVecEnv crashes in Colab notebooks).
 # Numpy-optimized env.py ensures high FPS even without multiprocessing.
 
 def _make_train_env(train_data):
-    """Creates a train env from in-memory DataFrame."""
+    """Creates a training env from in-memory DataFrame."""
     def _init():
         return OFITradingEnv(df=train_data)
     return _init
 
 def _make_eval_env(test_data, max_steps):
-    """Creates an eval env from in-memory DataFrame."""
+    """Creates an evaluation env from in-memory DataFrame."""
     def _init():
         return Monitor(OFITradingEnv(df=test_data.iloc[:max_steps].reset_index(drop=True)))
     return _init
@@ -139,11 +139,11 @@ model = PPO(
     device="auto"
 )
 
-print(f"\nV4 Egitim Basliyor")
-print(f"  Timestep  : {TOTAL_TIMESTEPS:,}")
-print(f"  Envs      : {n_envs} paralel")
-print(f"  GPU       : {model.device}")
-print(f"  Eval freq : her {eval_freq:,} step\n")
+print(f"\nStarting V4 Training")
+print(f"  Timesteps : {TOTAL_TIMESTEPS:,}")
+print(f"  Envs      : {n_envs} parallel")
+print(f"  Device    : {model.device}")
+print(f"  Eval freq : every {eval_freq:,} steps\n")
 
 model.learn(
     total_timesteps=TOTAL_TIMESTEPS,
@@ -156,9 +156,9 @@ vec_norm_path = os.path.join(MODELS_DIR, "vec_normalize.pkl")
 env.save(vec_norm_path)
 env.close()
 eval_env.close()
-print("\nV4 Egitim tamamlandi!")
+print("\nTraining complete!")
 
-# --- CELL 6: Indir ---
+# --- CELL 6: Download trained artifacts ---
 from google.colab import files
 
 best_path = os.path.join(MODELS_DIR, "best_model.zip")
@@ -166,13 +166,13 @@ final_path = os.path.join(MODELS_DIR, "final_trading_model.zip")
 
 if os.path.exists(best_path):
     files.download(best_path)
-    print("best_model.zip indirildi!")
+    print("Downloaded best_model.zip")
 else:
     files.download(final_path)
-    print("final_trading_model.zip indirildi!")
+    print("Downloaded final_trading_model.zip")
 
 files.download(vec_norm_path)
-print("vec_normalize.pkl indirildi!")
+print("Downloaded vec_normalize.pkl")
 
-print("\nIndirilen dosyalari models/ klasorune koyun:")
+print("\nPlace downloaded files in the models/ directory, then run:")
 print("  python backtest.py")
